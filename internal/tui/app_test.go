@@ -28,6 +28,21 @@ func TestAppStartGameTransitionsToGame(t *testing.T) {
 	}
 }
 
+func TestAppSettingsSavedUpdatesRootConfig(t *testing.T) {
+	a := NewApp()
+	updated := storage.DefaultConfig()
+	updated.SoundVolume = 40
+
+	model, _ := a.Update(settingsSavedMsg{config: updated})
+	next, ok := model.(App)
+	if !ok {
+		t.Fatalf("expected App, got %T", model)
+	}
+	if next.config.SoundVolume != 40 {
+		t.Fatalf("sound volume = %d, want 40", next.config.SoundVolume)
+	}
+}
+
 func TestAppHandlesWindowResizeWithoutPanic(t *testing.T) {
 	a := NewApp()
 	model, _ := a.Update(tea.WindowSizeMsg{Width: 100, Height: 30})

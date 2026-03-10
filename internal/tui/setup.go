@@ -106,7 +106,7 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.startGame()
 			}
 			m.adjustField(1)
-		case "escape":
+		case "escape", "esc":
 			return m, func() tea.Msg { return switchScreenMsg{screen: ScreenMenu} }
 		case "ctrl+c":
 			return m, tea.Quit
@@ -117,7 +117,7 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *SetupModel) handleNameEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "enter", "escape":
+	case "enter", "escape", "esc":
 		m.nameEdit = false
 		if m.name == "" {
 			m.name = "Player"

@@ -6,6 +6,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/fabiomigueldp/ante/internal/audio"
 	"github.com/fabiomigueldp/ante/internal/session"
 	"github.com/fabiomigueldp/ante/internal/storage"
 )
@@ -39,6 +40,9 @@ type (
 	appErrorMsg struct {
 		message string
 	}
+	settingsSavedMsg struct {
+		config storage.Config
+	}
 )
 
 // App is the root Bubble Tea model that routes between screens.
@@ -68,6 +72,8 @@ type App struct {
 // NewApp creates the root application model.
 func NewApp() App {
 	cfg := storage.LoadConfig()
+	audio.SetEnabled(cfg.SoundEnabled)
+	audio.SetVolume(float64(cfg.SoundVolume) / 100.0)
 	return App{
 		screen:   ScreenSplash,
 		splash:   NewSplashModel(),
@@ -101,6 +107,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.lastResult = msg.message
 			return a.switchTo(switchScreenMsg{screen: ScreenResults})
 		}
+	case settingsSavedMsg:
+		a.config = msg.config
+		a.clearError()
 	}
 
 	switch a.screen {
@@ -234,7 +243,7 @@ func (a App) startGame(msg startGameMsg) (tea.Model, tea.Cmd) {
 	a.lastSess = sess
 	a.lastResult = ""
 	a.screen = ScreenGame
-	a.game = NewGameModel(sess, a.config.SoundEnabled, a.config.ShowPotOdds)
+	a.game = NewGameModel(sess, a.config.ShowPotOdds)
 	a.clearError()
 
 	var cmd tea.Cmd

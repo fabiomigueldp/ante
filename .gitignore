@@ -2,6 +2,7 @@ bin/
 dist/
 coverage.out
 *.exe
+*.exe~
 *.test
 *.out
 *.log

@@ -32,7 +32,7 @@ func (m StatsViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "escape", "q":
+		case "escape", "esc", "q":
 			return m, func() tea.Msg { return switchScreenMsg{screen: ScreenMenu} }
 		case "ctrl+c":
 			return m, tea.Quit

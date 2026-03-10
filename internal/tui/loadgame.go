@@ -33,7 +33,7 @@ func (m LoadGameModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if len(m.saves) == 0 {
 			switch msg.String() {
-			case "escape", "q":
+			case "escape", "esc", "q":
 				return m, func() tea.Msg { return switchScreenMsg{screen: ScreenMenu} }
 			case "ctrl+c":
 				return m, tea.Quit
@@ -41,7 +41,7 @@ func (m LoadGameModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		switch msg.String() {
-		case "escape", "q":
+		case "escape", "esc", "q":
 			return m, func() tea.Msg { return switchScreenMsg{screen: ScreenMenu} }
 		case "ctrl+c":
 			return m, tea.Quit

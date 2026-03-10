@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fabiomigueldp/ante/internal/audio"
 	"github.com/fabiomigueldp/ante/internal/engine"
 	"github.com/fabiomigueldp/ante/internal/session"
 
@@ -19,8 +20,9 @@ type (
 	actionReqMsg     session.ActionRequest
 	sessionDoneMsg   struct{}
 	tickAnimationMsg struct{}
-	bellMsg          struct{}
 )
+
+var playGameSound = audio.Play
 
 // GameModel is the main game table screen.
 type GameModel struct {
@@ -67,9 +69,8 @@ type GameModel struct {
 	finished bool
 	result   string
 
-	// Bell setting
-	soundEnabled bool
-	showPotOdds  bool
+	// Settings
+	showPotOdds bool
 
 	// Pause
 	paused bool
@@ -82,15 +83,14 @@ type revealedHand struct {
 	eval     string
 }
 
-func NewGameModel(sess *session.Session, soundEnabled bool, showPotOdds bool) GameModel {
+func NewGameModel(sess *session.Session, showPotOdds bool) GameModel {
 	ts := sess.TableState()
 	return GameModel{
-		sess:         sess,
-		players:      ts.Players,
-		handNum:      ts.HandNum,
-		blinds:       ts.Blinds,
-		soundEnabled: soundEnabled,
-		showPotOdds:  showPotOdds,
+		sess:        sess,
+		players:     ts.Players,
+		handNum:     ts.HandNum,
+		blinds:      ts.Blinds,
+		showPotOdds: showPotOdds,
 	}
 }
 
@@ -205,6 +205,9 @@ func (m GameModel) handleSessionEvent(ev session.SessionEvent) (tea.Model, tea.C
 				m.lastAction = fmt.Sprintf("%s %s", name, actStr)
 			}
 			m.pot = e.PotTotal
+			if sound, ok := m.soundForAction(e); ok {
+				playGameSound(sound)
+			}
 		}
 		m.applySnapshot(ev.Snapshot)
 
@@ -214,6 +217,7 @@ func (m GameModel) handleSessionEvent(ev session.SessionEvent) (tea.Model, tea.C
 			m.street = e.Street
 			m.myBet = 0
 		}
+		playGameSound(audio.SoundStreetAdvance)
 		m.applySnapshot(ev.Snapshot)
 
 	case "showdown_started":
@@ -236,6 +240,9 @@ func (m GameModel) handleSessionEvent(ev session.SessionEvent) (tea.Model, tea.C
 				names[i] = m.sess.PlayerName(pid)
 			}
 			m.potAwards = append(m.potAwards, fmt.Sprintf("%s wins %s", strings.Join(names, ", "), ChipStr(e.Amount)))
+			if m.humanWonPot(e.Winners) {
+				playGameSound(audio.SoundPotWon)
+			}
 		}
 
 	case "player_eliminated":
@@ -246,6 +253,7 @@ func (m GameModel) handleSessionEvent(ev session.SessionEvent) (tea.Model, tea.C
 
 	case "blind_level_changed":
 		m.setMessage(ev.Message)
+		playGameSound(audio.SoundBlindIncrease)
 		m.applySnapshot(ev.Snapshot)
 
 	case "hand_complete":
@@ -257,6 +265,7 @@ func (m GameModel) handleSessionEvent(ev session.SessionEvent) (tea.Model, tea.C
 
 	case "action_error":
 		m.setMessage(ev.Message)
+		playGameSound(audio.SoundInvalidAction)
 		return m, m.waitForSession()
 
 	case "session_error":
@@ -272,14 +281,12 @@ func (m GameModel) handleSessionEvent(ev session.SessionEvent) (tea.Model, tea.C
 	case "tournament_finished", "session_ended":
 		m.finished = true
 		m.result = ev.Message
+		playGameSound(audio.SoundGameEnd)
 		return m, nil
 
 	case "waiting_for_human":
 		m.applySnapshot(ev.Snapshot)
-		if m.soundEnabled {
-			// Terminal bell
-			return m, tea.Batch(m.waitForSession(), func() tea.Msg { return bellMsg{} })
-		}
+		playGameSound(audio.SoundYourTurn)
 	}
 
 	return m, m.waitForSession()
@@ -313,15 +320,39 @@ func (m *GameModel) handleActionReq(req session.ActionRequest) (tea.Model, tea.C
 		m.potOddsStr = ""
 	}
 
-	var cmds []tea.Cmd
-	if m.soundEnabled {
-		cmds = append(cmds, func() tea.Msg { return bellMsg{} })
+	return *m, nil
+}
+
+func (m GameModel) soundForAction(e engine.ActionTakenEvent) (audio.SoundType, bool) {
+	if e.Action.Type == engine.ActionAllIn {
+		return audio.SoundAllIn, true
 	}
-	return *m, tea.Batch(cmds...)
+	if e.PlayerID != m.sess.HumanID {
+		return 0, false
+	}
+	switch e.Action.Type {
+	case engine.ActionCheck:
+		return audio.SoundCheck, true
+	case engine.ActionFold:
+		return audio.SoundFold, true
+	case engine.ActionCall, engine.ActionBet, engine.ActionRaise:
+		return audio.SoundChip, true
+	default:
+		return 0, false
+	}
+}
+
+func (m GameModel) humanWonPot(winners []engine.PlayerID) bool {
+	for _, pid := range winners {
+		if pid == m.sess.HumanID {
+			return true
+		}
+	}
+	return false
 }
 
 func (m GameModel) handleGameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.String() == "escape" {
+	if msg.String() == "escape" || msg.String() == "esc" {
 		m.paused = true
 		return m, nil
 	}
@@ -378,7 +409,7 @@ func (m GameModel) handleGameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m GameModel) handleBetInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "escape":
+	case "escape", "esc":
 		m.betMode = false
 		m.betInput = ""
 		return m, nil
@@ -460,7 +491,7 @@ func (m GameModel) advanceAnimation() (tea.Model, tea.Cmd) {
 
 func (m GameModel) handlePauseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "escape", "p":
+	case "escape", "esc", "p":
 		m.paused = false
 	case "s":
 		// TODO: Save game

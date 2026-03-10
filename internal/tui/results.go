@@ -34,7 +34,7 @@ func (m ResultsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "enter", " ", "escape", "q":
+		case "enter", " ", "escape", "esc", "q":
 			return m, func() tea.Msg { return switchScreenMsg{screen: ScreenMenu} }
 		case "ctrl+c":
 			return m, tea.Quit
