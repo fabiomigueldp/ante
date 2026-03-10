@@ -23,6 +23,14 @@ type Player struct {
 	SeatIndex int
 }
 
+func (p *Player) Clone() *Player {
+	if p == nil {
+		return nil
+	}
+	cp := *p
+	return &cp
+}
+
 func (p *Player) ResetForHand() {
 	p.Bet = 0
 	p.TotalBet = 0

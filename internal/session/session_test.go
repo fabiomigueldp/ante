@@ -301,6 +301,143 @@ func TestPlayerName(t *testing.T) {
 	}
 }
 
+func TestHandStartedEventEmitted(t *testing.T) {
+	// Verify that "hand_started" is emitted to the Events channel and
+	// arrives before blind_posted for the first hand.
+	cfg := Config{
+		Mode:          engine.ModeHeadsUpDuel,
+		Difficulty:    ai.DifficultyEasy,
+		Seats:         2,
+		StartingStack: 20,
+		PlayerName:    "TestHSE",
+		Seed:          12345,
+	}
+
+	sess, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sess.Run()
+	}()
+
+	// Auto-respond to actions in background
+	go func() {
+		for req := range sess.ActionReq {
+			action := engine.Action{PlayerID: sess.HumanID, Type: engine.ActionFold}
+			for _, la := range req.LegalActions {
+				if la.Type == engine.ActionCheck {
+					action.Type = engine.ActionCheck
+					break
+				}
+			}
+			sess.ActionResp <- action
+		}
+	}()
+
+	// Track first hand's event ordering
+	foundHandStarted := false
+	blindBeforeHandStarted := false
+	eventsDrained := make(chan struct{})
+	go func() {
+		defer close(eventsDrained)
+		firstHandChecked := false
+		for ev := range sess.Events {
+			if firstHandChecked {
+				continue // drain rest
+			}
+			switch ev.Type {
+			case "session_started":
+				continue
+			case "hand_started":
+				foundHandStarted = true
+				firstHandChecked = true // only check first hand
+			case "blind_posted":
+				if !foundHandStarted {
+					blindBeforeHandStarted = true
+				}
+				firstHandChecked = true
+			}
+		}
+	}()
+
+	<-done
+	<-eventsDrained
+
+	if !foundHandStarted {
+		t.Fatal("hand_started event was never emitted")
+	}
+	if blindBeforeHandStarted {
+		t.Error("blind_posted arrived before hand_started for the first hand")
+	}
+}
+
+func TestHandStartedEventContainsCorrectData(t *testing.T) {
+	cfg := Config{
+		Mode:          engine.ModeHeadsUpDuel,
+		Difficulty:    ai.DifficultyEasy,
+		Seats:         2,
+		StartingStack: 20,
+		PlayerName:    "HSData",
+		Seed:          54321,
+	}
+
+	sess, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sess.Run()
+	}()
+
+	go func() {
+		for req := range sess.ActionReq {
+			action := engine.Action{PlayerID: sess.HumanID, Type: engine.ActionFold}
+			for _, la := range req.LegalActions {
+				if la.Type == engine.ActionCheck {
+					action.Type = engine.ActionCheck
+					break
+				}
+			}
+			sess.ActionResp <- action
+		}
+	}()
+
+	var handStartedEvent engine.HandStartedEvent
+	found := false
+	eventsDrained := make(chan struct{})
+	go func() {
+		defer close(eventsDrained)
+		for ev := range sess.Events {
+			if ev.Type == "hand_started" && !found {
+				if e, ok := ev.Event.(engine.HandStartedEvent); ok {
+					handStartedEvent = e
+					found = true
+				}
+			}
+		}
+	}()
+
+	<-done
+	<-eventsDrained
+
+	if !found {
+		t.Fatal("hand_started event not found")
+	}
+	if handStartedEvent.Blinds.SB != 1 || handStartedEvent.Blinds.BB != 2 {
+		t.Errorf("blinds = %d/%d, want 1/2", handStartedEvent.Blinds.SB, handStartedEvent.Blinds.BB)
+	}
+	if handStartedEvent.HandID != 1 {
+		t.Errorf("HandID = %d, want 1", handStartedEvent.HandID)
+	}
+}
+
 func TestTableState(t *testing.T) {
 	cfg := Config{
 		Mode:          engine.ModeTournament,
@@ -329,4 +466,57 @@ func TestTableState(t *testing.T) {
 	if !humanFound {
 		t.Error("human player not found in TableState")
 	}
+}
+
+func TestSnapshotUsesCurrentHandStateWhileHandActive(t *testing.T) {
+	cfg := Config{
+		Mode:          engine.ModeTournament,
+		Difficulty:    ai.DifficultyMedium,
+		Seats:         3,
+		StartingStack: 100,
+		PlayerName:    "Hero",
+		Seed:          42,
+	}
+	sess, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	hand := sess.Table.NextHand()
+	if hand == nil {
+		t.Fatal("expected hand")
+	}
+	sess.currentHand = hand
+	handPlayer := playerByID(hand.Players, sess.HumanID)
+	tablePlayer := playerByID(sess.Table.Players, sess.HumanID)
+	if handPlayer == nil || tablePlayer == nil {
+		t.Fatal("expected both hand and table players")
+	}
+
+	handPlayer.Stack = 123
+	handPlayer.Bet = 7
+
+	ts := sess.TableState()
+	human := playerInfoByID(ts.Players, sess.HumanID)
+	if human == nil {
+		t.Fatal("expected human in table state")
+	}
+	if human.Stack != 123 {
+		t.Fatalf("snapshot stack = %d, want 123 from current hand", human.Stack)
+	}
+	if human.Bet != 7 {
+		t.Fatalf("snapshot bet = %d, want 7 from current hand", human.Bet)
+	}
+	if tablePlayer.Stack == 123 {
+		t.Fatal("table player should not have been mutated by hand-only change")
+	}
+}
+
+func playerInfoByID(players []PlayerInfo, id engine.PlayerID) *PlayerInfo {
+	for i := range players {
+		if players[i].ID == id {
+			return &players[i]
+		}
+	}
+	return nil
 }

@@ -118,6 +118,19 @@ func (m GameModel) Init() tea.Cmd {
 
 func (m GameModel) waitForSession() tea.Cmd {
 	return func() tea.Msg {
+		// Phase 1: drain any buffered Events first so that state
+		// updates (e.g. action_taken overwriting bot_thinking) are
+		// always processed before an ActionReq prompt.
+		select {
+		case ev, ok := <-m.sess.Events:
+			if !ok {
+				return sessionDoneMsg{}
+			}
+			return sessionEventMsg(ev)
+		default:
+		}
+
+		// Phase 2: nothing buffered — wait on both channels.
 		select {
 		case ev, ok := <-m.sess.Events:
 			if !ok {
@@ -317,6 +330,12 @@ func (m *GameModel) handleActionReq(req session.ActionRequest) (tea.Model, tea.C
 	m.legalActions = req.LegalActions
 	m.betInput = ""
 	m.betMode = false
+
+	// Clear stale bot "thinking" messages so they don't linger
+	// in the action bar while the human prompt is active.
+	if strings.HasSuffix(m.lastAction, "thinking...") {
+		m.lastAction = ""
+	}
 
 	// Update display from view
 	m.myCards = req.View.MyCards
@@ -732,63 +751,71 @@ func (m GameModel) renderSeat(p session.PlayerInfo) string {
 	isOut := p.Status == engine.StatusOut || p.Status == engine.StatusSittingOut
 	isDealer := p.Seat == m.dealerSeat
 
+	const contentW = 20 // SeatStyle Width(22) minus Padding(0,1) = 20
+
 	if isOut {
 		return lipgloss.NewStyle().Foreground(ColorDim).Width(22).Render(
 			fmt.Sprintf("%s\n  (out)", p.Name))
 	}
 
-	// Name line with dealer button
+	// Line 1: Name + dealer button (truncated to fit)
 	nameLine := p.Name
 	if isDealer {
 		nameLine += " " + StyleDealer.Render("(D)")
 	}
-
-	// Truncate name if too long
-	if lipgloss.Width(nameLine) > 22 {
-		runes := []rune(nameLine)
-		if len(runes) > 20 {
-			nameLine = string(runes[:19]) + "…"
+	if lipgloss.Width(nameLine) > contentW {
+		// Truncate the raw name, then re-append dealer badge
+		maxName := contentW
+		if isDealer {
+			maxName = contentW - 4 // room for " (D)"
+		}
+		runes := []rune(p.Name)
+		if len(runes) > maxName-1 {
+			nameLine = string(runes[:maxName-1]) + "…"
+		}
+		if isDealer {
+			nameLine += " " + StyleDealer.Render("(D)")
 		}
 	}
 
-	// Stack + bet on same line
+	// Line 2: Stack
 	stackLine := StyleChips.Render(ChipStr(p.Stack))
-	if p.Bet > 0 {
-		stackLine += "  " + StyleBet.Render("Bet: "+ChipStr(p.Bet))
-	}
 
-	// Status
-	statusLine := ""
+	// Line 3: Bet or status (one per line, not concatenated)
+	var statusLine string
+	if p.Bet > 0 {
+		statusLine = StyleBet.Render("Bet: " + ChipStr(p.Bet))
+	}
 	if isFolded {
 		statusLine = StyleFolded.Render("FOLDED")
 	} else if isAllIn {
 		statusLine = StyleAllIn.Render("ALL-IN")
 	}
 
-	// Cards (face down for opponents in active hand)
-	cardLine := "[##][##]"
-	// Check if this player has been revealed in showdown
-	for _, rev := range m.revealed {
-		if rev.playerID == p.ID {
-			cardLine = RenderHoleCards(rev.cards, true)
-			break
+	// Line 4: Cards
+	cardLine := ""
+	if !isFolded {
+		cardLine = "[##][##]"
+		for _, rev := range m.revealed {
+			if rev.playerID == p.ID {
+				cardLine = RenderHoleCards(rev.cards, true)
+				break
+			}
 		}
-	}
-	if isFolded {
-		cardLine = ""
 	}
 
 	style := SeatStyle(true, false, isFolded, isAllIn, isDealer)
 
-	content := nameLine + "\n" + stackLine
+	// Build content with each element on its own line
+	lines := []string{nameLine, stackLine}
 	if statusLine != "" {
-		content += "  " + statusLine
+		lines = append(lines, statusLine)
 	}
 	if cardLine != "" {
-		content += "\n" + cardLine
+		lines = append(lines, cardLine)
 	}
 
-	return style.Render(content)
+	return style.Render(strings.Join(lines, "\n"))
 }
 
 func (m GameModel) renderBoardArea(width int) string {

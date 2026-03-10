@@ -50,6 +50,39 @@ func (t *Table) NextHand() *Hand {
 	return hand
 }
 
+func (t *Table) ApplyHandResults(hand *Hand) {
+	if t == nil || hand == nil {
+		return
+	}
+	for _, tablePlayer := range t.Players {
+		if tablePlayer == nil {
+			continue
+		}
+		handPlayer := playerByID(hand.Players, tablePlayer.ID)
+		if handPlayer == nil {
+			continue
+		}
+		tablePlayer.Stack = handPlayer.Stack
+		tablePlayer.Bet = 0
+		tablePlayer.TotalBet = 0
+		tablePlayer.HoleCards = [2]Card{}
+
+		switch {
+		case tablePlayer.Status == StatusOut:
+			continue
+		case tablePlayer.Status == StatusSittingOut || handPlayer.Status == StatusSittingOut:
+			tablePlayer.Status = StatusSittingOut
+		case handPlayer.Stack == 0 && t.Mode == ModeCashGame:
+			tablePlayer.Status = StatusSittingOut
+		default:
+			tablePlayer.Status = StatusActive
+		}
+	}
+	if t.DealerSeat != hand.DealerSeat {
+		t.DealerSeat = hand.DealerSeat
+	}
+}
+
 func (t *Table) prepareForNextHand() {
 	for _, player := range t.Players {
 		if player == nil {
