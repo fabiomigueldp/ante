@@ -88,7 +88,7 @@ func TestConcurrentPlay(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			mgr.Play(SoundGameEnd)
+			mgr.Play(SoundVictory)
 		}()
 	}
 	wg.Wait()
@@ -124,6 +124,15 @@ func TestCooldownBlocksRapidReplay(t *testing.T) {
 	mgr.Play(SoundChip)
 	if fb.plays != 2 {
 		t.Fatalf("plays = %d, want 2", fb.plays)
+	}
+}
+
+func TestPerceptualVolumeIsMonotonic(t *testing.T) {
+	low := perceptualVolume(0.25)
+	mid := perceptualVolume(0.5)
+	high := perceptualVolume(0.75)
+	if !(low < mid && mid < high) {
+		t.Fatalf("expected monotonic volume curve, got low=%f mid=%f high=%f", low, mid, high)
 	}
 }
 

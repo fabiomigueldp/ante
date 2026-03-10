@@ -58,12 +58,13 @@ type GameModel struct {
 	potOddsStr   string
 
 	// Animation
-	showdown   bool
-	revealed   []revealedHand
-	potAwards  []string
-	animPhase  int
-	eventQueue []session.SessionEvent
-	processing bool
+	showdown       bool
+	revealed       []revealedHand
+	potAwards      []string
+	animPhase      int
+	eventQueue     []session.SessionEvent
+	processing     bool
+	handSoundState handSoundState
 
 	// Session ended
 	finished bool
@@ -81,6 +82,12 @@ type revealedHand struct {
 	name     string
 	cards    [2]engine.Card
 	eval     string
+}
+
+type handSoundState struct {
+	holeCuePlayed bool
+	potCuePlayed  bool
+	bustCuePlayed bool
 }
 
 func NewGameModel(sess *session.Session, showPotOdds bool) GameModel {
@@ -173,6 +180,7 @@ func (m GameModel) handleSessionEvent(ev session.SessionEvent) (tea.Model, tea.C
 			m.potAwards = nil
 			m.myBet = 0
 			m.lastAction = ""
+			m.handSoundState = handSoundState{}
 		}
 		m.applySnapshot(ev.Snapshot)
 
@@ -192,6 +200,10 @@ func (m GameModel) handleSessionEvent(ev session.SessionEvent) (tea.Model, tea.C
 		if e, ok := ev.Event.(engine.HoleCardsDealtEvent); ok {
 			if e.PlayerID == m.sess.HumanID {
 				m.myCards = e.Cards
+				if !m.handSoundState.holeCuePlayed {
+					playGameSound(audio.SoundHoleCards)
+					m.handSoundState.holeCuePlayed = true
+				}
 			}
 		}
 
@@ -216,12 +228,13 @@ func (m GameModel) handleSessionEvent(ev session.SessionEvent) (tea.Model, tea.C
 			m.board = append(m.board, e.NewCards...)
 			m.street = e.Street
 			m.myBet = 0
+			playGameSound(streetAdvanceSound(e))
 		}
-		playGameSound(audio.SoundStreetAdvance)
 		m.applySnapshot(ev.Snapshot)
 
 	case "showdown_started":
 		m.showdown = true
+		playGameSound(audio.SoundShowdown)
 
 	case "hand_revealed":
 		if e, ok := ev.Event.(engine.HandRevealedEvent); ok {
@@ -240,8 +253,9 @@ func (m GameModel) handleSessionEvent(ev session.SessionEvent) (tea.Model, tea.C
 				names[i] = m.sess.PlayerName(pid)
 			}
 			m.potAwards = append(m.potAwards, fmt.Sprintf("%s wins %s", strings.Join(names, ", "), ChipStr(e.Amount)))
-			if m.humanWonPot(e.Winners) {
+			if m.humanWonPot(e.Winners) && !m.handSoundState.potCuePlayed {
 				playGameSound(audio.SoundPotWon)
+				m.handSoundState.potCuePlayed = true
 			}
 		}
 
@@ -249,6 +263,10 @@ func (m GameModel) handleSessionEvent(ev session.SessionEvent) (tea.Model, tea.C
 		if e, ok := ev.Event.(engine.PlayerEliminatedEvent); ok {
 			name := m.sess.PlayerName(e.PlayerID)
 			m.setMessage(fmt.Sprintf("%s eliminated (#%d)", name, e.Position))
+			if m.shouldPlayBustout(e) {
+				playGameSound(audio.SoundBustout)
+				m.handSoundState.bustCuePlayed = true
+			}
 		}
 
 	case "blind_level_changed":
@@ -281,7 +299,7 @@ func (m GameModel) handleSessionEvent(ev session.SessionEvent) (tea.Model, tea.C
 	case "tournament_finished", "session_ended":
 		m.finished = true
 		m.result = ev.Message
-		playGameSound(audio.SoundGameEnd)
+		playGameSound(m.sessionEndSound(ev))
 		return m, nil
 
 	case "waiting_for_human":
@@ -328,7 +346,12 @@ func (m GameModel) soundForAction(e engine.ActionTakenEvent) (audio.SoundType, b
 		return audio.SoundAllIn, true
 	}
 	if e.PlayerID != m.sess.HumanID {
-		return 0, false
+		switch e.Action.Type {
+		case engine.ActionBet, engine.ActionRaise:
+			return audio.SoundOpponentPressure, true
+		default:
+			return 0, false
+		}
 	}
 	switch e.Action.Type {
 	case engine.ActionCheck:
@@ -349,6 +372,59 @@ func (m GameModel) humanWonPot(winners []engine.PlayerID) bool {
 		}
 	}
 	return false
+}
+
+func (m GameModel) shouldPlayBustout(e engine.PlayerEliminatedEvent) bool {
+	if m.handSoundState.bustCuePlayed {
+		return false
+	}
+	if e.PlayerID == m.sess.HumanID {
+		return true
+	}
+	return m.sess.Config.Mode != engine.ModeCashGame
+}
+
+func (m GameModel) sessionEndSound(ev session.SessionEvent) audio.SoundType {
+	if m.didHumanWinSession(ev) {
+		return audio.SoundVictory
+	}
+	return audio.SoundDefeat
+}
+
+func (m GameModel) didHumanWinSession(ev session.SessionEvent) bool {
+	switch ev.Type {
+	case "tournament_finished":
+		if e, ok := ev.Event.(engine.TournamentFinishedEvent); ok {
+			for _, result := range e.Results {
+				if result.PlayerID == m.sess.HumanID {
+					return result.Position == 1
+				}
+			}
+		}
+	case "session_ended":
+		human := m.findPlayer(m.sess.HumanID)
+		if human == nil {
+			return false
+		}
+		return human.Stack >= m.sess.Config.CashGameBuyIn
+	}
+	return false
+}
+
+func (m GameModel) findPlayer(pid engine.PlayerID) *session.PlayerInfo {
+	for i := range m.players {
+		if m.players[i].ID == pid {
+			return &m.players[i]
+		}
+	}
+	return nil
+}
+
+func streetAdvanceSound(e engine.StreetAdvancedEvent) audio.SoundType {
+	if len(e.NewCards) >= 3 {
+		return audio.SoundFlop
+	}
+	return audio.SoundTurnRiver
 }
 
 func (m GameModel) handleGameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

@@ -61,6 +61,20 @@ func TestNoiseBurstDeterministic(t *testing.T) {
 	}
 }
 
+func TestNoiseBurstProducesSignal(t *testing.T) {
+	buf := noiseBurst(0.02, 0.2)
+	nonZero := false
+	for _, sample := range buf {
+		if sample != 0 {
+			nonZero = true
+			break
+		}
+	}
+	if !nonZero {
+		t.Fatal("expected non-zero samples")
+	}
+}
+
 func TestMixBuffersNormalization(t *testing.T) {
 	a := sineWave(440, 0.1, 0.9)
 	b := sineWave(660, 0.1, 0.9)
