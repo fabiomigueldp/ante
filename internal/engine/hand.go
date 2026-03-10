@@ -292,6 +292,12 @@ func (h *Hand) AdvanceStreet() []Event {
 	event := StreetAdvancedEvent{Street: h.Street, NewCards: cloneCards(newCards)}
 	h.recordEvent(event)
 	h.ActionSeat = h.firstPostflopToAct()
+	// If nobody can act (all-in / folded), mark for auto-advance
+	if h.ActionSeat == -1 && h.noPlayerCanAct() {
+		if h.Street == StreetRiver {
+			h.Phase = PhaseShowdown
+		}
+	}
 	return []Event{event}
 }
 
@@ -607,4 +613,13 @@ func indexOfSeat(seats []int, seat int) int {
 		}
 	}
 	return -1
+}
+
+func (h *Hand) noPlayerCanAct() bool {
+	for _, p := range h.Players {
+		if p != nil && p.CanAct() {
+			return false
+		}
+	}
+	return true
 }

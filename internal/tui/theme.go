@@ -151,10 +151,14 @@ var (
 			Bold(true)
 )
 
+// StyleBet is used for opponent bet display.
+var StyleBet = lipgloss.NewStyle().
+	Foreground(ColorCyan)
+
 // SeatStyle returns the style for a player seat panel.
 func SeatStyle(active, isHuman, isFolded, isAllIn, isDealer bool) lipgloss.Style {
 	base := lipgloss.NewStyle().
-		Width(18).
+		Width(22).
 		Padding(0, 1)
 	if isFolded {
 		return base.Foreground(ColorDim)

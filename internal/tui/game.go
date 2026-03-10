@@ -657,29 +657,29 @@ func (m GameModel) renderSeat(p session.PlayerInfo) string {
 	isDealer := p.Seat == m.dealerSeat
 
 	if isOut {
-		return lipgloss.NewStyle().Foreground(ColorDim).Width(18).Render(
+		return lipgloss.NewStyle().Foreground(ColorDim).Width(22).Render(
 			fmt.Sprintf("%s\n  (out)", p.Name))
 	}
 
 	// Name line with dealer button
 	nameLine := p.Name
-	if p.Nickname != "" {
-		nameLine = fmt.Sprintf("%s \"%s\"", p.Name, p.Nickname)
-	}
 	if isDealer {
 		nameLine += " " + StyleDealer.Render("(D)")
 	}
 
 	// Truncate name if too long
-	if lipgloss.Width(nameLine) > 18 {
+	if lipgloss.Width(nameLine) > 22 {
 		runes := []rune(nameLine)
-		if len(runes) > 16 {
-			nameLine = string(runes[:16]) + ".."
+		if len(runes) > 20 {
+			nameLine = string(runes[:19]) + "…"
 		}
 	}
 
-	// Stack and bet
+	// Stack + bet on same line
 	stackLine := StyleChips.Render(ChipStr(p.Stack))
+	if p.Bet > 0 {
+		stackLine += "  " + StyleBet.Render("Bet: "+ChipStr(p.Bet))
+	}
 
 	// Status
 	statusLine := ""
@@ -705,11 +705,11 @@ func (m GameModel) renderSeat(p session.PlayerInfo) string {
 	style := SeatStyle(true, false, isFolded, isAllIn, isDealer)
 
 	content := nameLine + "\n" + stackLine
+	if statusLine != "" {
+		content += "  " + statusLine
+	}
 	if cardLine != "" {
 		content += "\n" + cardLine
-	}
-	if statusLine != "" {
-		content += "\n" + statusLine
 	}
 
 	return style.Render(content)
@@ -847,7 +847,11 @@ func (m GameModel) renderActionBar() string {
 	if m.hasLegal(engine.ActionAllIn) {
 		for _, la := range m.legalActions {
 			if la.Type == engine.ActionAllIn {
-				actions = append(actions, StyleKey.Render("[A]")+" All-In "+ChipStr(la.MinAmount))
+				allInDisplay := la.MinAmount - m.myBet
+				if allInDisplay < 0 {
+					allInDisplay = 0
+				}
+				actions = append(actions, StyleKey.Render("[A]")+" All-In "+ChipStr(allInDisplay))
 				break
 			}
 		}

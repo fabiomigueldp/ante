@@ -313,6 +313,11 @@ func (s *Session) handleAction(hand *engine.Hand, playerID engine.PlayerID) {
 
 // handleHumanAction sends the action request to the TUI and waits for a response.
 func (s *Session) handleHumanAction(hand *engine.Hand, playerID engine.PlayerID) {
+	// Skip if player has no legal actions (e.g., already all-in)
+	preCheck := hand.LegalActions(playerID)
+	if len(preCheck) == 0 {
+		return
+	}
 	const maxRetries = 10
 	for attempt := range maxRetries {
 		view := hand.PlayerView(playerID)
@@ -643,6 +648,7 @@ type PlayerInfo struct {
 	Name     string
 	Nickname string
 	Stack    int
+	Bet      int
 	Status   engine.PlayerStatus
 	Seat     int
 	IsHuman  bool
@@ -665,6 +671,7 @@ func (s *Session) snapshot() TableState {
 			ID:      p.ID,
 			Name:    p.Name,
 			Stack:   p.Stack,
+			Bet:     p.Bet,
 			Status:  p.Status,
 			Seat:    p.SeatIndex,
 			IsHuman: p.ID == s.HumanID,

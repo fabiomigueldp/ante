@@ -52,3 +52,25 @@ func TestRaiseReopensAction(t *testing.T) {
 		t.Fatal("expected prior acted players to be reopened")
 	}
 }
+
+func TestAllInAmountIsTargetBet(t *testing.T) {
+	// Hypothesis A: player with Stack=439, Bet=10 should show AllIn MinAmount=449 (total target)
+	br := NewBettingRound(StreetPreflop, 2, 10)
+	player := &Player{ID: 1, Stack: 439, Bet: 10, Status: StatusActive}
+	legal := br.LegalActions(player)
+	for _, la := range legal {
+		if la.Type == ActionAllIn {
+			expected := player.Bet + player.Stack // 449
+			if la.MinAmount != expected {
+				t.Fatalf("AllIn MinAmount = %d, want %d (Bet %d + Stack %d)", la.MinAmount, expected, player.Bet, player.Stack)
+			}
+			// The TUI should display MinAmount - Bet = 439 (remaining stack)
+			display := la.MinAmount - player.Bet
+			if display != player.Stack {
+				t.Fatalf("AllIn display = %d, want %d (remaining stack)", display, player.Stack)
+			}
+			return
+		}
+	}
+	t.Fatal("AllIn action not found in legal actions")
+}
