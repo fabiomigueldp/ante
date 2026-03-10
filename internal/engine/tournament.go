@@ -37,23 +37,37 @@ func (t *Tournament) HandleEliminations(hand *Hand) []PlayerEliminatedEvent {
 	if hand == nil || t.Table == nil {
 		return nil
 	}
+	t.Table.ApplyHandResults(hand)
 	remaining := len(t.Table.ActivePlayers())
 	var events []PlayerEliminatedEvent
-	for _, player := range t.Table.Players {
-		if player == nil || player.Status == StatusOut || player.Stack > 0 {
+	for _, player := range hand.Players {
+		if player == nil || player.Status == StatusOut || player.Status == StatusSittingOut || player.Stack > 0 || t.wasEliminated(player.ID) {
+			continue
+		}
+		tablePlayer := playerByID(t.Table.Players, player.ID)
+		if tablePlayer == nil {
 			continue
 		}
 		position := remaining
 		if position == 0 {
 			position = 1
 		}
-		player.Status = StatusOut
+		tablePlayer.Status = StatusOut
 		t.Eliminations = append(t.Eliminations, Elimination{PlayerID: player.ID, Position: position, HandNum: hand.ID})
 		event := PlayerEliminatedEvent{PlayerID: player.ID, Position: position, OnHandID: hand.ID, FinalStack: 0}
 		events = append(events, event)
 		remaining--
 	}
 	return events
+}
+
+func (t *Tournament) wasEliminated(id PlayerID) bool {
+	for _, elim := range t.Eliminations {
+		if elim.PlayerID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *Tournament) ShouldTransitionToHeadsUp() bool {

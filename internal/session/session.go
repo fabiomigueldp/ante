@@ -242,9 +242,24 @@ func (s *Session) Run() {
 		s.currentHand = hand
 		s.HandCount++
 
+		// Emit hand_started so TUI resets state between hands.
+		// The HandStartedEvent is recorded inside NewHand() but never
+		// returned from any method, so we emit it explicitly here.
+		if !s.emit(SessionEvent{
+			Type:   "hand_started",
+			Event:  engine.HandStartedEvent{HandID: hand.ID, DealerSeat: hand.DealerSeat, SBSeat: hand.SBSeat, BBSeat: hand.BBSeat, Blinds: hand.Blinds},
+			HandID: hand.ID,
+		}) {
+			return
+		}
+
 		summary, ok := s.playHand(hand)
 		if !ok || s.isStopped() {
 			return
+		}
+
+		if s.Tournament == nil {
+			s.Table.ApplyHandResults(hand)
 		}
 
 		// Record hand history
@@ -427,7 +442,7 @@ func (s *Session) handleBotAction(hand *engine.Hand, playerID engine.PlayerID) {
 	s.emitEngineEvents(hand.ID, events)
 
 	// Check if bot lost big (for tilt)
-	player := playerByID(s.Table.Players, playerID)
+	player := playerByID(hand.Players, playerID)
 	if player != nil {
 		stackFraction := 1.0 - float64(player.Stack)/float64(s.startingChips())
 		if stackFraction > 0.4 {
@@ -663,7 +678,11 @@ func (s *Session) snapshot() TableState {
 		HandNum: s.HandCount,
 		Blinds:  s.Table.CurrentBlinds(),
 	}
-	for _, p := range s.Table.Players {
+	players := s.Table.Players
+	if s.currentHand != nil && s.currentHand.Phase != engine.PhaseComplete {
+		players = s.currentHand.Players
+	}
+	for _, p := range players {
 		if p == nil {
 			continue
 		}

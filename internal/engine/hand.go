@@ -66,8 +66,9 @@ func NewHand(id int, players []*Player, dealerSeat int, blinds BlindLevel, seed 
 		if player == nil {
 			continue
 		}
-		player.ResetForHand()
-		prepared = append(prepared, player)
+		clone := player.Clone()
+		clone.ResetForHand()
+		prepared = append(prepared, clone)
 	}
 	deck := NewDeck(seed)
 	deck.Shuffle()
@@ -151,7 +152,14 @@ func (h *Hand) DealHoleCards() []Event {
 		h.recordEvent(event)
 		emitted = append(emitted, event)
 	}
-	h.Betting = NewBettingRound(StreetPreflop, h.Blinds.BB, h.Blinds.BB)
+	// Set CurrentBet to the BB player's actual Bet, which already includes
+	// any posted ante.  Without this, CurrentBet == BB and players who
+	// posted an ante would only need to call BB-ante instead of BB.
+	currentBet := h.Blinds.BB
+	if bb := h.playerAtSeat(h.BBSeat); bb != nil {
+		currentBet = bb.Bet
+	}
+	h.Betting = NewBettingRound(StreetPreflop, h.Blinds.BB, currentBet)
 	h.Phase = PhasePreflop
 	h.Street = StreetPreflop
 	h.ActionSeat = h.preflopFirstToActSeat()
