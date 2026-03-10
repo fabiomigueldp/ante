@@ -2,32 +2,40 @@ package tui
 
 import "github.com/charmbracelet/lipgloss"
 
-// Color palette
+// Seat geometry constants.
+const (
+	SeatTotalWidth   = 22 // outer width including padding
+	SeatContentWidth = 20 // SeatTotalWidth minus Padding(0,1)
+	SeatHeight       = 5  // fixed line count per seat block
+	SeatGap          = 3  // horizontal space between seats
+)
+
+// Color palette — premium poker room: dark base, refined green accents.
 var (
-	ColorGreen      = lipgloss.Color("#2d5016")
-	ColorDarkGreen  = lipgloss.Color("#1a3009")
-	ColorFelt       = lipgloss.Color("#1e4d1e")
-	ColorGold       = lipgloss.Color("#d4a017")
-	ColorRed        = lipgloss.Color("#cc3333")
-	ColorWhite      = lipgloss.Color("#f0f0f0")
-	ColorGray       = lipgloss.Color("#888888")
-	ColorDarkGray   = lipgloss.Color("#444444")
-	ColorBlack      = lipgloss.Color("#111111")
-	ColorCyan       = lipgloss.Color("#00cccc")
-	ColorYellow     = lipgloss.Color("#cccc00")
-	ColorBrightRed  = lipgloss.Color("#ff4444")
-	ColorDim        = lipgloss.Color("#666666")
-	ColorHighlight  = lipgloss.Color("#ffcc00")
-	ColorCardWhite  = lipgloss.Color("#ffffff")
-	ColorCardBack   = lipgloss.Color("#2244aa")
-	ColorSpade      = lipgloss.Color("#e0e0e0")
-	ColorHeart      = lipgloss.Color("#ff3333")
-	ColorDiamond    = lipgloss.Color("#ff6633")
-	ColorClub       = lipgloss.Color("#99cc99")
-	ColorActiveSeat = lipgloss.Color("#335533")
-	ColorFolded     = lipgloss.Color("#333333")
-	ColorDealer     = lipgloss.Color("#ffdd44")
-	ColorAllIn      = lipgloss.Color("#ff6600")
+	ColorGreen      = lipgloss.Color("#1a5c2a")
+	ColorDarkGreen  = lipgloss.Color("#0f3318")
+	ColorFelt       = lipgloss.Color("#14472a")
+	ColorGold       = lipgloss.Color("#c9a84c")
+	ColorRed        = lipgloss.Color("#9b2d30")
+	ColorWhite      = lipgloss.Color("#e8e4dc")
+	ColorGray       = lipgloss.Color("#8a8a82")
+	ColorDarkGray   = lipgloss.Color("#3a3a36")
+	ColorBlack      = lipgloss.Color("#0e0e0c")
+	ColorCyan       = lipgloss.Color("#5ba4a4")
+	ColorYellow     = lipgloss.Color("#b8a44c")
+	ColorBrightRed  = lipgloss.Color("#c44040")
+	ColorDim        = lipgloss.Color("#5a6a5a")
+	ColorHighlight  = lipgloss.Color("#dfc867")
+	ColorCardWhite  = lipgloss.Color("#f5f3ee")
+	ColorCardBack   = lipgloss.Color("#1b3a6b")
+	ColorSpade      = lipgloss.Color("#d4d0c8")
+	ColorHeart      = lipgloss.Color("#c44040")
+	ColorDiamond    = lipgloss.Color("#c47040")
+	ColorClub       = lipgloss.Color("#6ea87a")
+	ColorActiveSeat = lipgloss.Color("#253d2a")
+	ColorFolded     = lipgloss.Color("#2a2a26")
+	ColorDealer     = lipgloss.Color("#dfc867")
+	ColorAllIn      = lipgloss.Color("#cc6633")
 )
 
 // Styles — commonly used styled renderers.
@@ -42,7 +50,7 @@ var (
 			Align(lipgloss.Center)
 
 	StyleBorder = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
+			Border(lipgloss.NormalBorder()).
 			BorderForeground(ColorDarkGray)
 
 	StyleMenuTitle = lipgloss.NewStyle().
@@ -158,7 +166,8 @@ var StyleBet = lipgloss.NewStyle().
 // SeatStyle returns the style for a player seat panel.
 func SeatStyle(active, isHuman, isFolded, isAllIn, isDealer bool) lipgloss.Style {
 	base := lipgloss.NewStyle().
-		Width(22).
+		Width(SeatTotalWidth).
+		Height(SeatHeight).
 		Padding(0, 1)
 	if isFolded {
 		return base.Foreground(ColorDim)

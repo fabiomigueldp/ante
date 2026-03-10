@@ -181,6 +181,12 @@ func (m GameModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m GameModel) handleSessionEvent(ev session.SessionEvent) (tea.Model, tea.Cmd) {
+	// Authoritatively clear action state on every non-prompt event.
+	// Only handleActionReq sets needsAction back to true.
+	m.needsAction = false
+	m.betMode = false
+	m.lastAction = ""
+
 	switch ev.Type {
 	case "hand_started":
 		if e, ok := ev.Event.(engine.HandStartedEvent); ok {
@@ -462,7 +468,11 @@ func (m GameModel) handleGameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "q": // Fold
-		return m.submitAction(engine.Action{Type: engine.ActionFold})
+		if m.hasLegal(engine.ActionFold) {
+			return m.submitAction(engine.Action{Type: engine.ActionFold})
+		}
+		m.setMessage("Can't fold — checking is free.")
+		return m, nil
 	case "w": // Check
 		if m.hasLegal(engine.ActionCheck) {
 			return m.submitAction(engine.Action{Type: engine.ActionCheck})
@@ -544,6 +554,7 @@ func (m GameModel) submitAction(action engine.Action) (tea.Model, tea.Cmd) {
 	m.needsAction = false
 	m.betMode = false
 	m.potOddsStr = ""
+	m.lastAction = ""
 
 	return m, func() tea.Msg {
 		m.sess.ActionResp <- action
@@ -664,8 +675,8 @@ func (m GameModel) renderTable() string {
 	// Separate players into rows
 	humanPlayer, opponents := m.splitPlayers()
 
-	// Top row of opponents
-	topRow := m.renderOpponentRow(opponents, 0, w)
+	// Top row(s) of opponents
+	topRow := m.renderOpponentArea(opponents, w)
 	// Middle: board + pot
 	boardRow := m.renderBoardArea(w)
 	// Bottom: human player
@@ -709,14 +720,14 @@ func (m GameModel) splitPlayers() (*session.PlayerInfo, []session.PlayerInfo) {
 		if m.players[i].IsHuman {
 			h := m.players[i]
 			human = &h
-		} else {
+		} else if m.players[i].Status != engine.StatusOut && m.players[i].Status != engine.StatusSittingOut {
 			opponents = append(opponents, m.players[i])
 		}
 	}
 	return human, opponents
 }
 
-func (m GameModel) renderOpponentRow(opponents []session.PlayerInfo, startIdx int, width int) string {
+func (m GameModel) renderOpponentArea(opponents []session.PlayerInfo, width int) string {
 	if len(opponents) == 0 {
 		return ""
 	}
@@ -726,23 +737,43 @@ func (m GameModel) renderOpponentRow(opponents []session.PlayerInfo, startIdx in
 		seats = append(seats, m.renderSeat(opp))
 	}
 
-	// Distribute seats evenly across width
-	totalSeatWidth := 0
-	for _, s := range seats {
-		totalSeatWidth += lipgloss.Width(s)
+	// Calculate how many seats fit per row
+	maxPerRow := (width + SeatGap) / (SeatTotalWidth + SeatGap)
+	if maxPerRow < 1 {
+		maxPerRow = 1
 	}
 
-	gap := (width - totalSeatWidth) / (len(seats) + 1)
-	if gap < 1 {
-		gap = 1
+	// Split into rows if needed
+	var rows []string
+	for i := 0; i < len(seats); i += maxPerRow {
+		end := i + maxPerRow
+		if end > len(seats) {
+			end = len(seats)
+		}
+		row := joinSeats(seats[i:end], width)
+		rows = append(rows, row)
 	}
 
-	var row string
-	for _, s := range seats {
-		row += strings.Repeat(" ", gap) + s
+	return strings.Join(rows, "\n")
+}
+
+// joinSeats horizontally joins seat blocks with SeatGap spacing, centered in width.
+func joinSeats(seats []string, width int) string {
+	if len(seats) == 0 {
+		return ""
 	}
 
-	return row + "\n"
+	parts := make([]string, 0, len(seats))
+	for i, s := range seats {
+		seat := s
+		if i < len(seats)-1 {
+			seat = lipgloss.NewStyle().MarginRight(SeatGap).Render(seat)
+		}
+		parts = append(parts, seat)
+	}
+
+	joined := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+	return lipgloss.PlaceHorizontal(width, lipgloss.Center, joined)
 }
 
 func (m GameModel) renderSeat(p session.PlayerInfo) string {
@@ -751,51 +782,49 @@ func (m GameModel) renderSeat(p session.PlayerInfo) string {
 	isOut := p.Status == engine.StatusOut || p.Status == engine.StatusSittingOut
 	isDealer := p.Seat == m.dealerSeat
 
-	const contentW = 20 // SeatStyle Width(22) minus Padding(0,1) = 20
-
-	if isOut {
-		return lipgloss.NewStyle().Foreground(ColorDim).Width(22).Render(
-			fmt.Sprintf("%s\n  (out)", p.Name))
-	}
-
-	// Line 1: Name + dealer button (truncated to fit)
+	// Line 1: Name + dealer badge
 	nameLine := p.Name
 	if isDealer {
-		nameLine += " " + StyleDealer.Render("(D)")
-	}
-	if lipgloss.Width(nameLine) > contentW {
-		// Truncate the raw name, then re-append dealer badge
-		maxName := contentW
-		if isDealer {
-			maxName = contentW - 4 // room for " (D)"
-		}
+		badge := " " + StyleDealer.Render("D")
+		maxName := SeatContentWidth - 2 // room for " D"
 		runes := []rune(p.Name)
-		if len(runes) > maxName-1 {
+		if len(runes) > maxName {
 			nameLine = string(runes[:maxName-1]) + "…"
 		}
-		if isDealer {
-			nameLine += " " + StyleDealer.Render("(D)")
+		nameLine += badge
+	} else if lipgloss.Width(nameLine) > SeatContentWidth {
+		runes := []rune(p.Name)
+		if len(runes) > SeatContentWidth-1 {
+			nameLine = string(runes[:SeatContentWidth-1]) + "…"
 		}
 	}
 
 	// Line 2: Stack
+	if isOut {
+		content := strings.Join([]string{nameLine, ChipStr(p.Stack), "OUT", ""}, "\n")
+		return lipgloss.NewStyle().
+			Width(SeatTotalWidth).
+			Height(SeatHeight).
+			Padding(0, 1).
+			Foreground(ColorDim).
+			Render(content)
+	}
 	stackLine := StyleChips.Render(ChipStr(p.Stack))
 
-	// Line 3: Bet or status (one per line, not concatenated)
+	// Line 3: Status / Bet
 	var statusLine string
-	if p.Bet > 0 {
-		statusLine = StyleBet.Render("Bet: " + ChipStr(p.Bet))
-	}
 	if isFolded {
 		statusLine = StyleFolded.Render("FOLDED")
 	} else if isAllIn {
 		statusLine = StyleAllIn.Render("ALL-IN")
+	} else if p.Bet > 0 {
+		statusLine = StyleBet.Render("Bet: " + ChipStr(p.Bet))
 	}
 
 	// Line 4: Cards
 	cardLine := ""
 	if !isFolded {
-		cardLine = "[##][##]"
+		cardLine = "[" + CardBack() + "][" + CardBack() + "]"
 		for _, rev := range m.revealed {
 			if rev.playerID == p.ID {
 				cardLine = RenderHoleCards(rev.cards, true)
@@ -806,16 +835,9 @@ func (m GameModel) renderSeat(p session.PlayerInfo) string {
 
 	style := SeatStyle(true, false, isFolded, isAllIn, isDealer)
 
-	// Build content with each element on its own line
-	lines := []string{nameLine, stackLine}
-	if statusLine != "" {
-		lines = append(lines, statusLine)
-	}
-	if cardLine != "" {
-		lines = append(lines, cardLine)
-	}
-
-	return style.Render(strings.Join(lines, "\n"))
+	// Always 4 content lines; SeatStyle Height(5) pads to uniform block.
+	content := strings.Join([]string{nameLine, stackLine, statusLine, cardLine}, "\n")
+	return style.Render(content)
 }
 
 func (m GameModel) renderBoardArea(width int) string {
@@ -852,7 +874,7 @@ func (m GameModel) renderHumanArea(human *session.PlayerInfo, width int) string 
 	isDealer := human.Seat == m.dealerSeat
 	dealerStr := ""
 	if isDealer {
-		dealerStr = StyleDealer.Render(" (D)")
+		dealerStr = " " + StyleDealer.Render("D")
 	}
 
 	info := stack
@@ -974,7 +996,7 @@ func (m GameModel) renderActionBar() string {
 
 func (m GameModel) renderPauseOverlay() string {
 	menu := lipgloss.NewStyle().
-		Border(lipgloss.DoubleBorder()).
+		Border(lipgloss.NormalBorder()).
 		BorderForeground(ColorGold).
 		Padding(1, 3).
 		Render(lipgloss.JoinVertical(lipgloss.Left,
