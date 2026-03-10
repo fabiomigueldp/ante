@@ -52,7 +52,7 @@ func CardStr(c engine.Card) string {
 
 // CardBack renders a face-down card.
 func CardBack() string {
-	return lipgloss.NewStyle().Foreground(ColorCardBack).Render("##")
+	return lipgloss.NewStyle().Foreground(ColorCardBack).Render("░░")
 }
 
 // RenderHoleCards renders two hole cards inline.

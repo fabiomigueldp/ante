@@ -373,7 +373,7 @@ func (s *Session) handleHumanAction(hand *engine.Hand, playerID engine.PlayerID)
 			s.emit(SessionEvent{
 				Type:    "action_error",
 				HandID:  hand.ID,
-				Message: fmt.Sprintf("Invalid action: %v", err),
+				Message: humanizeActionError(action, legal, err),
 			})
 			continue
 		}
@@ -715,6 +715,40 @@ func (s *Session) isStopped() bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// humanizeActionError converts a raw engine error into a user-friendly message.
+func humanizeActionError(action engine.Action, legal []engine.LegalAction, _ error) string {
+	// Check if fold was attempted when check is free
+	if action.Type == engine.ActionFold {
+		for _, la := range legal {
+			if la.Type == engine.ActionCheck {
+				return "You can't fold — checking is free."
+			}
+		}
+	}
+
+	// Check for below-minimum raise/bet
+	if action.Type == engine.ActionRaise || action.Type == engine.ActionBet {
+		for _, la := range legal {
+			if la.Type == action.Type && action.Amount < la.MinAmount {
+				return fmt.Sprintf("Minimum %s is %d.", actionLabel(action.Type), la.MinAmount)
+			}
+		}
+	}
+
+	return "That action is not available right now."
+}
+
+func actionLabel(t engine.ActionType) string {
+	switch t {
+	case engine.ActionBet:
+		return "bet"
+	case engine.ActionRaise:
+		return "raise"
+	default:
+		return "amount"
 	}
 }
 
