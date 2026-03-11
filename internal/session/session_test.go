@@ -34,8 +34,10 @@ func TestNewSession(t *testing.T) {
 	if sess.Phase != PhaseSetup {
 		t.Errorf("Phase = %d, want PhaseSetup", sess.Phase)
 	}
+	if sess.SessionID == "" {
+		t.Fatal("expected non-empty SessionID")
+	}
 
-	// Human is seat 0
 	human := playerByID(sess.Table.Players, 1)
 	if human == nil {
 		t.Fatal("human player not found")
@@ -47,7 +49,6 @@ func TestNewSession(t *testing.T) {
 		t.Errorf("human.Name = %q, want %q", human.Name, "TestPlayer")
 	}
 
-	// All players have same starting stack
 	startChips := sess.startingChips()
 	for _, p := range sess.Table.Players {
 		if p.Stack != startChips {
@@ -105,8 +106,6 @@ func TestNewSession_CashGame(t *testing.T) {
 	if sess.Tournament != nil {
 		t.Error("Tournament should not be set for CashGame mode")
 	}
-
-	// Check all players have cash game buy-in
 	for _, p := range sess.Table.Players {
 		if p.Stack != 1000 {
 			t.Errorf("player %d stack = %d, want 1000", p.ID, p.Stack)
@@ -116,14 +115,12 @@ func TestNewSession_CashGame(t *testing.T) {
 
 func TestNewSession_InvalidSeats(t *testing.T) {
 	cfg := Config{Mode: engine.ModeTournament, Seats: 1}
-	_, err := New(cfg)
-	if err == nil {
+	if _, err := New(cfg); err == nil {
 		t.Error("expected error for seats < 2")
 	}
 
 	cfg.Seats = 10
-	_, err = New(cfg)
-	if err == nil {
+	if _, err := New(cfg); err == nil {
 		t.Error("expected error for seats > 9")
 	}
 }
@@ -143,51 +140,7 @@ func TestSessionRun_SmallTournament(t *testing.T) {
 		t.Fatalf("New() error: %v", err)
 	}
 
-	// Run session in a goroutine
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		sess.Run()
-	}()
-
-	// Automated play: always pick first legal action (fold/check)
-	eventsDrained := make(chan struct{})
-	go func() {
-		defer close(eventsDrained)
-		for range sess.Events {
-			// drain events
-		}
-	}()
-
-	// Handle action requests: auto-play
-	go func() {
-		for req := range sess.ActionReq {
-			// Choose the safest action: check > call > fold
-			var chosen engine.Action
-			chosen.PlayerID = sess.HumanID
-			for _, la := range req.LegalActions {
-				if la.Type == engine.ActionCheck {
-					chosen.Type = engine.ActionCheck
-					break
-				}
-				if la.Type == engine.ActionCall {
-					chosen.Type = engine.ActionCall
-					break
-				}
-				if la.Type == engine.ActionFold {
-					chosen.Type = engine.ActionFold
-				}
-			}
-			if chosen.Type == 0 && len(req.LegalActions) > 0 {
-				chosen.Type = req.LegalActions[0].Type
-				chosen.Amount = req.LegalActions[0].MinAmount
-			}
-			sess.ActionResp <- chosen
-		}
-	}()
-
-	<-done
-	<-eventsDrained
+	runSessionWithAutoPlay(t, sess, defaultActionForPrompt, nil)
 
 	if sess.Phase != PhaseSessionOver {
 		t.Errorf("Phase = %d, want PhaseSessionOver", sess.Phase)
@@ -198,8 +151,6 @@ func TestSessionRun_SmallTournament(t *testing.T) {
 	if len(sess.History.Records) == 0 {
 		t.Error("expected hand history to be recorded")
 	}
-
-	t.Logf("Tournament ended after %d hands", sess.HandCount)
 }
 
 func TestSessionRun_DeterministicSeeds(t *testing.T) {
@@ -212,69 +163,19 @@ func TestSessionRun_DeterministicSeeds(t *testing.T) {
 		Seed:          777,
 	}
 
-	// Run twice, compare hand count (deterministic with same decisions)
 	counts := [2]int{}
 	for run := range 2 {
 		sess, err := New(cfg)
 		if err != nil {
 			t.Fatal(err)
 		}
-
-		done := make(chan struct{})
-		drained := make(chan struct{})
-		go func() {
-			defer close(done)
-			sess.Run()
-		}()
-
-		go func() {
-			defer close(drained)
-			for range sess.Events {
-			}
-		}()
-
-		actionsDone := make(chan struct{})
-		go func() {
-			defer close(actionsDone)
-			for req := range sess.ActionReq {
-				// Pick best available: check > call > fold
-				action := engine.Action{PlayerID: sess.HumanID}
-				picked := false
-				for _, la := range req.LegalActions {
-					if la.Type == engine.ActionCheck {
-						action.Type = engine.ActionCheck
-						picked = true
-						break
-					}
-				}
-				if !picked {
-					for _, la := range req.LegalActions {
-						if la.Type == engine.ActionFold {
-							action.Type = engine.ActionFold
-							picked = true
-							break
-						}
-					}
-				}
-				if !picked && len(req.LegalActions) > 0 {
-					action.Type = req.LegalActions[0].Type
-					action.Amount = req.LegalActions[0].MinAmount
-				}
-				sess.ActionResp <- action
-			}
-		}()
-
-		<-done
-		<-drained
-		<-actionsDone
+		runSessionWithAutoPlay(t, sess, defaultActionForPrompt, nil)
 		counts[run] = sess.HandCount
-		t.Logf("Run %d: %d hands", run, counts[run])
 	}
 
 	if counts[0] != counts[1] {
 		t.Errorf("non-deterministic: run1=%d hands, run2=%d hands", counts[0], counts[1])
 	}
-	t.Logf("Both runs: %d hands (deterministic)", counts[0])
 }
 
 func TestPlayerName(t *testing.T) {
@@ -291,19 +192,14 @@ func TestPlayerName(t *testing.T) {
 	if sess.PlayerName(sess.HumanID) != "Hero" {
 		t.Errorf("PlayerName(human) = %q, want %q", sess.PlayerName(sess.HumanID), "Hero")
 	}
-
-	// Bot names should be non-empty
 	for pid := range sess.Bots {
-		name := sess.PlayerName(pid)
-		if name == "" {
+		if name := sess.PlayerName(pid); name == "" {
 			t.Errorf("bot %d has empty name", pid)
 		}
 	}
 }
 
-func TestHandStartedEventEmitted(t *testing.T) {
-	// Verify that "hand_started" is emitted to the Events channel and
-	// arrives before blind_posted for the first hand.
+func TestHandStartedEnvelopeOrdering(t *testing.T) {
 	cfg := Config{
 		Mode:          engine.ModeHeadsUpDuel,
 		Difficulty:    ai.DifficultyEasy,
@@ -318,64 +214,35 @@ func TestHandStartedEventEmitted(t *testing.T) {
 		t.Fatalf("New() error: %v", err)
 	}
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		sess.Run()
-	}()
-
-	// Auto-respond to actions in background
-	go func() {
-		for req := range sess.ActionReq {
-			action := engine.Action{PlayerID: sess.HumanID, Type: engine.ActionFold}
-			for _, la := range req.LegalActions {
-				if la.Type == engine.ActionCheck {
-					action.Type = engine.ActionCheck
-					break
-				}
-			}
-			sess.ActionResp <- action
-		}
-	}()
-
-	// Track first hand's event ordering
 	foundHandStarted := false
 	blindBeforeHandStarted := false
-	eventsDrained := make(chan struct{})
-	go func() {
-		defer close(eventsDrained)
-		firstHandChecked := false
-		for ev := range sess.Events {
-			if firstHandChecked {
-				continue // drain rest
-			}
-			switch ev.Type {
-			case "session_started":
-				continue
-			case "hand_started":
+	runSessionWithAutoPlay(t, sess, defaultActionForPrompt, func(env Envelope) {
+		if env.Notice == nil {
+			return
+		}
+		switch env.Notice.Type {
+		case "session_started":
+			return
+		case "hand_started":
+			if !foundHandStarted {
 				foundHandStarted = true
-				firstHandChecked = true // only check first hand
-			case "blind_posted":
-				if !foundHandStarted {
-					blindBeforeHandStarted = true
-				}
-				firstHandChecked = true
+			}
+		case "blind_posted":
+			if !foundHandStarted {
+				blindBeforeHandStarted = true
 			}
 		}
-	}()
-
-	<-done
-	<-eventsDrained
+	})
 
 	if !foundHandStarted {
-		t.Fatal("hand_started event was never emitted")
+		t.Fatal("hand_started notice was never emitted")
 	}
 	if blindBeforeHandStarted {
 		t.Error("blind_posted arrived before hand_started for the first hand")
 	}
 }
 
-func TestHandStartedEventContainsCorrectData(t *testing.T) {
+func TestHandStartedEnvelopeContainsCorrectData(t *testing.T) {
 	cfg := Config{
 		Mode:          engine.ModeHeadsUpDuel,
 		Difficulty:    ai.DifficultyEasy,
@@ -390,51 +257,28 @@ func TestHandStartedEventContainsCorrectData(t *testing.T) {
 		t.Fatalf("New() error: %v", err)
 	}
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		sess.Run()
-	}()
-
-	go func() {
-		for req := range sess.ActionReq {
-			action := engine.Action{PlayerID: sess.HumanID, Type: engine.ActionFold}
-			for _, la := range req.LegalActions {
-				if la.Type == engine.ActionCheck {
-					action.Type = engine.ActionCheck
-					break
-				}
-			}
-			sess.ActionResp <- action
-		}
-	}()
-
-	var handStartedEvent engine.HandStartedEvent
+	var started engine.HandStartedEvent
 	found := false
-	eventsDrained := make(chan struct{})
-	go func() {
-		defer close(eventsDrained)
-		for ev := range sess.Events {
-			if ev.Type == "hand_started" && !found {
-				if e, ok := ev.Event.(engine.HandStartedEvent); ok {
-					handStartedEvent = e
-					found = true
-				}
-			}
+	runSessionWithAutoPlay(t, sess, defaultActionForPrompt, func(env Envelope) {
+		if found || env.Notice == nil || env.Notice.Type != "hand_started" {
+			return
 		}
-	}()
-
-	<-done
-	<-eventsDrained
+		event, ok := env.Notice.Event.(engine.HandStartedEvent)
+		if !ok {
+			t.Fatalf("expected HandStartedEvent, got %T", env.Notice.Event)
+		}
+		started = event
+		found = true
+	})
 
 	if !found {
-		t.Fatal("hand_started event not found")
+		t.Fatal("hand_started notice not found")
 	}
-	if handStartedEvent.Blinds.SB != 1 || handStartedEvent.Blinds.BB != 2 {
-		t.Errorf("blinds = %d/%d, want 1/2", handStartedEvent.Blinds.SB, handStartedEvent.Blinds.BB)
+	if started.Blinds.SB != 1 || started.Blinds.BB != 2 {
+		t.Errorf("blinds = %d/%d, want 1/2", started.Blinds.SB, started.Blinds.BB)
 	}
-	if handStartedEvent.HandID != 1 {
-		t.Errorf("HandID = %d, want 1", handStartedEvent.HandID)
+	if started.HandID != 1 {
+		t.Errorf("HandID = %d, want 1", started.HandID)
 	}
 }
 
@@ -510,6 +354,47 @@ func TestSnapshotUsesCurrentHandStateWhileHandActive(t *testing.T) {
 	if tablePlayer.Stack == 123 {
 		t.Fatal("table player should not have been mutated by hand-only change")
 	}
+}
+
+func runSessionWithAutoPlay(t *testing.T, sess *Session, chooser func(*Prompt) engine.Action, observe func(Envelope)) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sess.Run()
+	}()
+	for env := range sess.Updates {
+		if observe != nil {
+			observe(env)
+		}
+		if env.Prompt != nil {
+			action := chooser(env.Prompt)
+			sess.ActionResp <- PlayerActionIntent{PromptSeq: env.Prompt.Seq, HandID: env.Prompt.HandID, Action: action}
+		}
+	}
+	<-done
+}
+
+func defaultActionForPrompt(prompt *Prompt) engine.Action {
+	action := engine.Action{PlayerID: prompt.PlayerID, Type: engine.ActionFold}
+	for _, legal := range prompt.LegalActions {
+		if legal.Type == engine.ActionCheck {
+			action.Type = engine.ActionCheck
+			return action
+		}
+	}
+	for _, legal := range prompt.LegalActions {
+		if legal.Type == engine.ActionCall {
+			action.Type = engine.ActionCall
+			action.Amount = legal.MinAmount
+			return action
+		}
+	}
+	if len(prompt.LegalActions) > 0 {
+		action.Type = prompt.LegalActions[0].Type
+		action.Amount = prompt.LegalActions[0].MinAmount
+	}
+	return action
 }
 
 func playerInfoByID(players []PlayerInfo, id engine.PlayerID) *PlayerInfo {

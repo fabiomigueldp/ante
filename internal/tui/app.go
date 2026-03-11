@@ -298,12 +298,20 @@ func (a *App) updateGame(msg tea.Msg) tea.Cmd {
 	m, cmd := a.game.Update(msg)
 	if next, ok := m.(GameModel); ok {
 		a.game = next
-		if ev, ok := msg.(sessionEventMsg); ok {
-			actual := session.SessionEvent(ev)
-			if actual.Type == "session_error" {
-				a.errorMsg = actual.Message
-				a.lastResult = actual.Message
+		if envMsg, ok := msg.(envelopeMsg); ok {
+			env := session.Envelope(envMsg)
+			if env.Error != nil && env.Error.Code == "session_error" {
+				a.errorMsg = env.Error.Message
+				a.lastResult = env.Error.Message
 				return func() tea.Msg { return switchScreenMsg{screen: ScreenResults} }
+			}
+			if env.IsTerminal() {
+				if env.Notice != nil {
+					a.lastResult = env.Notice.Message
+				}
+				if env.Error != nil {
+					a.lastResult = env.Error.Message
+				}
 			}
 		}
 		return cmd

@@ -1,9 +1,12 @@
 package session
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
-	"math/rand"
+	mathrand "math/rand"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,27 +37,6 @@ const (
 	PhaseSessionOver
 )
 
-// ActionRequest is sent to the TUI when the human needs to act.
-type ActionRequest struct {
-	View         engine.PlayerView
-	LegalActions []engine.LegalAction
-	HandID       int
-	Snapshot     TableState
-}
-
-// SessionEvent wraps engine events with additional session-level metadata.
-type SessionEvent struct {
-	Type      string
-	Event     engine.Event // nil for session-level events
-	HandID    int
-	PlayerID  engine.PlayerID
-	BotName   string // set for bot actions
-	ThinkTime int    // ms, for bot thinking animation
-	Reason    string // bot decision reason
-	Message   string // human-readable session message
-	Snapshot  TableState
-}
-
 // HandSummary is emitted after each hand completes.
 type HandSummary struct {
 	HandID       int
@@ -68,6 +50,7 @@ type HandSummary struct {
 // Session orchestrates the full game: Table + Hand + Bots + Human interaction.
 type Session struct {
 	Config     Config
+	SessionID  string
 	Table      *engine.Table
 	Tournament *engine.Tournament
 	CashGame   *engine.CashGame
@@ -79,16 +62,16 @@ type Session struct {
 	HandCount int
 
 	// Channels for TUI communication
-	Events     chan SessionEvent  // session -> TUI (buffered)
-	ActionReq  chan ActionRequest // session -> TUI (unbuffered)
-	ActionResp chan engine.Action // TUI -> session (unbuffered)
+	Updates    chan Envelope           // session -> TUI (buffered)
+	ActionResp chan PlayerActionIntent // TUI -> session (unbuffered)
 
 	// Internal
 	currentHand *engine.Hand
-	rng         *rand.Rand
+	rng         *mathrand.Rand
 	botOrder    []engine.PlayerID // for deterministic iteration
 	stop        chan struct{}
 	stopOnce    sync.Once
+	seq         uint64
 }
 
 // New creates a session from config. Does not start the game loop.
@@ -106,7 +89,7 @@ func New(cfg Config) (*Session, error) {
 		cfg.StartingStack = 200 // default 200 BB
 	}
 
-	rng := rand.New(rand.NewSource(cfg.Seed))
+	rng := mathrand.New(mathrand.NewSource(cfg.Seed))
 
 	// Build blind structure
 	var structure engine.BlindStructure
@@ -187,14 +170,14 @@ func New(cfg Config) (*Session, error) {
 
 	sess := &Session{
 		Config:     cfg,
+		SessionID:  mustNewSessionID(),
 		Table:      table,
 		History:    &engine.SessionHistory{},
 		Bots:       bots,
 		HumanID:    1,
 		Phase:      PhaseSetup,
-		Events:     make(chan SessionEvent, 1024),
-		ActionReq:  make(chan ActionRequest),
-		ActionResp: make(chan engine.Action),
+		Updates:    make(chan Envelope, 1024),
+		ActionResp: make(chan PlayerActionIntent),
 		rng:        rng,
 		botOrder:   botOrder,
 		stop:       make(chan struct{}),
@@ -212,22 +195,18 @@ func New(cfg Config) (*Session, error) {
 }
 
 // Run starts the game loop. Blocks until the session ends.
-// The TUI should call this in a goroutine and listen on Events/ActionReq channels.
+// The TUI should call this in a goroutine and listen on Updates.
 func (s *Session) Run() {
 	defer func() {
 		if r := recover(); r != nil {
-			s.emit(SessionEvent{
-				Type:    "session_error",
-				Message: fmt.Sprintf("Session crashed: %v", r),
-				Reason:  string(debug.Stack()),
-			})
+			s.emitEnvelope(Envelope{Error: &SessionError{Code: "session_error", Message: fmt.Sprintf("Session crashed: %v", r)}})
+			_ = debug.Stack()
 		}
-		close(s.Events)
-		close(s.ActionReq)
+		close(s.Updates)
 	}()
 
 	s.Phase = PhasePlaying
-	if !s.emit(SessionEvent{Type: "session_started", Message: fmt.Sprintf("Welcome to the table, %s!", s.Config.PlayerName)}) {
+	if _, ok := s.emitEnvelope(Envelope{Notice: &Notice{Type: "session_started", Message: fmt.Sprintf("Welcome to the table, %s!", s.Config.PlayerName)}}); !ok {
 		return
 	}
 
@@ -245,11 +224,14 @@ func (s *Session) Run() {
 		// Emit hand_started so TUI resets state between hands.
 		// The HandStartedEvent is recorded inside NewHand() but never
 		// returned from any method, so we emit it explicitly here.
-		if !s.emit(SessionEvent{
-			Type:   "hand_started",
-			Event:  engine.HandStartedEvent{HandID: hand.ID, DealerSeat: hand.DealerSeat, SBSeat: hand.SBSeat, BBSeat: hand.BBSeat, Blinds: hand.Blinds},
+		if _, ok := s.emitEnvelope(Envelope{
 			HandID: hand.ID,
-		}) {
+			Notice: &Notice{
+				Type:    "hand_started",
+				Event:   engine.HandStartedEvent{HandID: hand.ID, DealerSeat: hand.DealerSeat, SBSeat: hand.SBSeat, BBSeat: hand.BBSeat, Blinds: hand.Blinds},
+				Message: fmt.Sprintf("Hand #%d begins", hand.ID),
+			},
+		}); !ok {
 			return
 		}
 
@@ -266,11 +248,7 @@ func (s *Session) Run() {
 		s.recordHand(hand)
 
 		// Emit hand summary
-		s.emit(SessionEvent{
-			Type:    "hand_complete",
-			HandID:  hand.ID,
-			Message: fmt.Sprintf("Hand #%d complete", hand.ID),
-		})
+		s.emitEnvelope(Envelope{HandID: hand.ID, Notice: &Notice{Type: "hand_complete", Message: fmt.Sprintf("Hand #%d complete", hand.ID)}})
 		s.emitHandSummary(summary)
 
 		// Check session end conditions
@@ -334,46 +312,51 @@ func (s *Session) handleHumanAction(hand *engine.Hand, playerID engine.PlayerID)
 		return
 	}
 	const maxRetries = 10
-	for attempt := range maxRetries {
+	for range maxRetries {
 		view := hand.PlayerView(playerID)
 		legal := hand.LegalActions(playerID)
-
-		if attempt == 0 {
-			s.emit(SessionEvent{
+		promptSeq, ok := s.emitEnvelope(Envelope{
+			HandID: hand.ID,
+			Prompt: &Prompt{
+				PlayerID:     playerID,
+				View:         view,
+				LegalActions: legal,
+				HandID:       hand.ID,
+			},
+			Notice: &Notice{
 				Type:     "waiting_for_human",
-				HandID:   hand.ID,
 				PlayerID: playerID,
 				Message:  "Your turn",
-			})
-		}
-
-		// Send request to TUI
-		select {
-		case <-s.stop:
+			},
+		})
+		if !ok {
 			return
-		case s.ActionReq <- ActionRequest{
-			View:         view,
-			LegalActions: legal,
-			HandID:       hand.ID,
-			Snapshot:     s.snapshot(),
-		}:
 		}
 
 		// Wait for response from TUI
-		var action engine.Action
+		var intent PlayerActionIntent
 		select {
 		case <-s.stop:
 			return
-		case action = <-s.ActionResp:
+		case intent = <-s.ActionResp:
 		}
+		if intent.PromptSeq != promptSeq || intent.HandID != hand.ID {
+			s.emitEnvelope(Envelope{
+				HandID: hand.ID,
+				Prompt: &Prompt{PlayerID: playerID, View: view, LegalActions: legal, HandID: hand.ID},
+				Error:  &SessionError{Code: "stale_action", Message: "That action expired. Use the current prompt."},
+			})
+			continue
+		}
+		action := intent.Action
 		action.PlayerID = playerID
 
 		events, err := hand.ApplyAction(playerID, action)
 		if err != nil {
-			s.emit(SessionEvent{
-				Type:    "action_error",
-				HandID:  hand.ID,
-				Message: humanizeActionError(action, legal, err),
+			s.emitEnvelope(Envelope{
+				HandID: hand.ID,
+				Prompt: &Prompt{PlayerID: playerID, View: view, LegalActions: legal, HandID: hand.ID},
+				Error:  &SessionError{Code: "invalid_action", Message: humanizeActionError(action, legal, err)},
 			})
 			continue
 		}
@@ -416,14 +399,7 @@ func (s *Session) handleBotAction(hand *engine.Hand, playerID engine.PlayerID) {
 	decision := bot.Decide(view)
 
 	// Emit thinking event (TUI will animate this)
-	s.emit(SessionEvent{
-		Type:      "bot_thinking",
-		HandID:    hand.ID,
-		PlayerID:  playerID,
-		BotName:   bot.Character.Profile.Name,
-		ThinkTime: decision.Think,
-		Reason:    decision.Reason,
-	})
+	s.emitEnvelope(Envelope{HandID: hand.ID, Notice: &Notice{Type: "bot_thinking", PlayerID: playerID, BotName: bot.Character.Profile.Name, ThinkTime: decision.Think, Reason: decision.Reason, Message: fmt.Sprintf("%s is thinking...", bot.Character.Profile.Name)}})
 
 	events, err := hand.ApplyAction(playerID, decision.Action)
 	if err != nil {
@@ -469,12 +445,7 @@ func (s *Session) buildHandSummary(hand *engine.Hand) HandSummary {
 		blindChange := s.Tournament.CheckBlindIncrease()
 		if blindChange != nil {
 			summary.BlindChange = blindChange
-			s.emit(SessionEvent{
-				Type:    "blind_level_changed",
-				HandID:  hand.ID,
-				Event:   *blindChange,
-				Message: fmt.Sprintf("Blinds increase to %d/%d (ante: %d)", blindChange.SB, blindChange.BB, blindChange.Ante),
-			})
+			s.emitEnvelope(Envelope{HandID: hand.ID, Notice: &Notice{Type: "blind_level_changed", Event: *blindChange, Message: fmt.Sprintf("Blinds increase to %d/%d (ante: %d)", blindChange.SB, blindChange.BB, blindChange.Ante)}})
 		}
 	}
 
@@ -521,47 +492,17 @@ func (s *Session) recordHand(hand *engine.Hand) {
 	s.History.Add(record)
 }
 
-// emit sends a session event to the TUI.
-func (s *Session) emit(event SessionEvent) bool {
-	if event.Snapshot.Players == nil {
-		event.Snapshot = s.snapshot()
-	}
-	select {
-	case <-s.stop:
-		return false
-	case s.Events <- event:
-		return true
-	}
-}
-
-// emitEngineEvents wraps engine events as session events and sends them.
+// emitEngineEvents wraps engine events as envelopes and sends them.
 func (s *Session) emitEngineEvents(handID int, events []engine.Event) {
 	for _, e := range events {
-		se := SessionEvent{
-			Type:   e.EventType(),
-			Event:  e,
-			HandID: handID,
-		}
-
-		// Enrich with bot info for action events
-		if ate, ok := e.(engine.ActionTakenEvent); ok {
-			se.PlayerID = ate.PlayerID
-			if bot, exists := s.Bots[ate.PlayerID]; exists {
-				se.BotName = bot.Character.Profile.Name
-			}
-		}
-
-		s.emit(se)
+		notice := s.noticeForEngineEvent(e)
+		s.emitEnvelope(Envelope{HandID: handID, Notice: &notice})
 	}
 }
 
 // emitHandSummary sends the hand summary as an event.
 func (s *Session) emitHandSummary(summary HandSummary) {
-	s.emit(SessionEvent{
-		Type:    "hand_summary",
-		HandID:  summary.HandID,
-		Message: fmt.Sprintf("Hand #%d — Your stack: %d chips", summary.HandID, summary.PlayerStack),
-	})
+	s.emitEnvelope(Envelope{HandID: summary.HandID, Notice: &Notice{Type: "hand_summary", Message: fmt.Sprintf("Hand #%d - Your stack: %d chips", summary.HandID, summary.PlayerStack)}})
 }
 
 // emitSessionEnd sends the final session event.
@@ -575,11 +516,7 @@ func (s *Session) emitSessionEnd() {
 				break
 			}
 		}
-		s.emit(SessionEvent{
-			Type:    "tournament_finished",
-			Event:   engine.TournamentFinishedEvent{Results: results},
-			Message: msg,
-		})
+		s.emitEnvelope(Envelope{Notice: &Notice{Type: "tournament_finished", Event: engine.TournamentFinishedEvent{Results: results}, Message: msg}})
 	} else {
 		humanPlayer := playerByID(s.Table.Players, s.HumanID)
 		profit := 0
@@ -591,10 +528,7 @@ func (s *Session) emitSessionEnd() {
 		} else {
 			msg = fmt.Sprintf("Session over. You lost %d chips.", -profit)
 		}
-		s.emit(SessionEvent{
-			Type:    "session_ended",
-			Message: msg,
-		})
+		s.emitEnvelope(Envelope{Notice: &Notice{Type: "session_ended", Message: msg}})
 	}
 }
 
@@ -653,9 +587,15 @@ func (s *Session) IsHuman(pid engine.PlayerID) bool {
 
 // TableState returns a snapshot of all player stacks and statuses.
 type TableState struct {
-	Players []PlayerInfo
-	HandNum int
-	Blinds  engine.BlindLevel
+	Players    []PlayerInfo
+	HandNum    int
+	HandID     int
+	Blinds     engine.BlindLevel
+	Board      []engine.Card
+	Pot        int
+	Street     engine.Street
+	DealerSeat int
+	HumanCards [2]engine.Card
 }
 
 type PlayerInfo struct {
@@ -679,8 +619,17 @@ func (s *Session) snapshot() TableState {
 		Blinds:  s.Table.CurrentBlinds(),
 	}
 	players := s.Table.Players
-	if s.currentHand != nil && s.currentHand.Phase != engine.PhaseComplete {
-		players = s.currentHand.Players
+	if s.currentHand != nil {
+		ts.HandID = s.currentHand.ID
+		ts.Board = append([]engine.Card(nil), s.currentHand.Board...)
+		ts.Street = s.currentHand.Street
+		ts.DealerSeat = s.currentHand.DealerSeat
+		view := s.currentHand.PlayerView(s.HumanID)
+		ts.Pot = view.Pot
+		ts.HumanCards = view.MyCards
+		if s.currentHand.Phase != engine.PhaseComplete {
+			players = s.currentHand.Players
+		}
 	}
 	for _, p := range players {
 		if p == nil {
@@ -701,6 +650,136 @@ func (s *Session) snapshot() TableState {
 		ts.Players = append(ts.Players, pi)
 	}
 	return ts
+}
+
+func (s *Session) emitEnvelope(env Envelope) (uint64, bool) {
+	if env.Snapshot.Players == nil {
+		env.Snapshot = s.snapshot()
+	}
+	s.seq++
+	env.Seq = s.seq
+	env.SessionID = s.SessionID
+	if env.HandID == 0 {
+		env.HandID = env.Snapshot.HandID
+	}
+	if env.Prompt != nil {
+		env.Prompt.Seq = env.Seq
+		if env.Prompt.HandID == 0 {
+			env.Prompt.HandID = env.HandID
+		}
+	}
+	select {
+	case <-s.stop:
+		return 0, false
+	case s.Updates <- env:
+		return env.Seq, true
+	}
+}
+
+func (s *Session) noticeForEngineEvent(event engine.Event) Notice {
+	notice := Notice{Type: event.EventType(), Event: event, Message: event.EventType()}
+	switch e := event.(type) {
+	case engine.BlindsPostedEvent:
+		blind := "SB"
+		if e.Type == engine.BlindBig {
+			blind = "BB"
+		} else if e.Type == engine.BlindAnte {
+			blind = "ante"
+		}
+		notice.PlayerID = e.PlayerID
+		notice.Message = fmt.Sprintf("%s posts %s %d", s.PlayerName(e.PlayerID), blind, e.Amount)
+	case engine.HoleCardsDealtEvent:
+		notice.PlayerID = e.PlayerID
+		notice.Message = fmt.Sprintf("%s is dealt hole cards", s.PlayerName(e.PlayerID))
+	case engine.ActionTakenEvent:
+		notice.PlayerID = e.PlayerID
+		notice.Message = formatActionNotice(s.PlayerName(e.PlayerID), e.Action)
+		if bot, ok := s.Bots[e.PlayerID]; ok {
+			notice.BotName = bot.Character.Profile.Name
+		}
+	case engine.StreetAdvancedEvent:
+		notice.Message = streetAdvanceMessage(e)
+	case engine.ShowdownStartedEvent:
+		notice.Message = "Showdown"
+	case engine.HandRevealedEvent:
+		notice.PlayerID = e.PlayerID
+		notice.Message = fmt.Sprintf("%s shows %s", s.PlayerName(e.PlayerID), e.Eval.Name)
+	case engine.PotAwardedEvent:
+		notice.Message = formatPotAwardMessage(s, e)
+	case engine.PlayerEliminatedEvent:
+		notice.PlayerID = e.PlayerID
+		notice.Message = fmt.Sprintf("%s eliminated (#%d)", s.PlayerName(e.PlayerID), e.Position)
+	case engine.BlindLevelChangedEvent:
+		notice.Message = fmt.Sprintf("Blinds increase to %d/%d (ante: %d)", e.SB, e.BB, e.Ante)
+	case engine.TournamentFinishedEvent:
+		notice.Message = "Tournament finished"
+	}
+	return notice
+}
+
+func formatActionNotice(name string, action engine.Action) string {
+	label := actionLabel(action.Type)
+	if action.Type == engine.ActionCheck {
+		label = "checks"
+	}
+	if action.Type == engine.ActionFold {
+		label = "folds"
+	}
+	if action.Type == engine.ActionCall {
+		label = "calls"
+	}
+	if action.Type == engine.ActionBet {
+		label = "bets"
+	}
+	if action.Type == engine.ActionRaise {
+		label = "raises"
+	}
+	if action.Type == engine.ActionAllIn {
+		label = "moves all-in"
+	}
+	if action.Amount > 0 {
+		return fmt.Sprintf("%s %s %d", name, label, action.Amount)
+	}
+	return fmt.Sprintf("%s %s", name, label)
+}
+
+func streetAdvanceMessage(event engine.StreetAdvancedEvent) string {
+	switch event.Street {
+	case engine.StreetFlop:
+		return "Flop"
+	case engine.StreetTurn:
+		return "Turn"
+	case engine.StreetRiver:
+		return "River"
+	default:
+		return "Next street"
+	}
+}
+
+func formatPotAwardMessage(s *Session, event engine.PotAwardedEvent) string {
+	names := make([]string, 0, len(event.Winners))
+	for _, playerID := range event.Winners {
+		names = append(names, s.PlayerName(playerID))
+	}
+	return fmt.Sprintf("%s wins %d", joinNames(names), event.Amount)
+}
+
+func joinNames(names []string) string {
+	if len(names) == 0 {
+		return "No one"
+	}
+	if len(names) == 1 {
+		return names[0]
+	}
+	return fmt.Sprintf("%s and %s", strings.Join(names[:len(names)-1], ", "), names[len(names)-1])
+}
+
+func mustNewSessionID() string {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return fmt.Sprintf("ses_%032x", time.Now().UnixNano())
+	}
+	return "ses_" + hex.EncodeToString(raw[:])
 }
 
 func (s *Session) Stop() {

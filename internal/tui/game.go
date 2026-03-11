@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/fabiomigueldp/ante/internal/audio"
 	"github.com/fabiomigueldp/ante/internal/engine"
@@ -14,74 +13,28 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Messages for game screen communication.
 type (
-	sessionEventMsg  session.SessionEvent
-	actionReqMsg     session.ActionRequest
+	envelopeMsg      session.Envelope
 	sessionDoneMsg   struct{}
 	tickAnimationMsg struct{}
 )
 
 var playGameSound = audio.Play
 
-// GameModel is the main game table screen.
 type GameModel struct {
 	width  int
 	height int
 
-	// Session
 	sess *session.Session
+	vm   session.GameVM
 
-	// Display state
-	players    []session.PlayerInfo
-	board      []engine.Card
-	pot        int
-	street     engine.Street
-	handNum    int
-	blinds     engine.BlindLevel
-	dealerSeat int
-	lastAction string
-	message    string
-	msgExpiry  time.Time
+	betInput string
+	betMode  bool
 
-	// Human cards
-	myCards [2]engine.Card
-	myStack int
-	myBet   int
-
-	// Action state
-	needsAction  bool
-	actionReq    *session.ActionRequest
-	legalActions []engine.LegalAction
-	betInput     string
-	betMode      bool
-	potOddsStr   string
-
-	// Animation
-	showdown       bool
-	revealed       []revealedHand
-	potAwards      []string
-	animPhase      int
-	eventQueue     []session.SessionEvent
-	processing     bool
-	handSoundState handSoundState
-
-	// Session ended
-	finished bool
-	result   string
-
-	// Settings
 	showPotOdds bool
+	paused      bool
 
-	// Pause
-	paused bool
-}
-
-type revealedHand struct {
-	playerID engine.PlayerID
-	name     string
-	cards    [2]engine.Card
-	eval     string
+	handSoundState handSoundState
 }
 
 type handSoundState struct {
@@ -91,18 +44,14 @@ type handSoundState struct {
 }
 
 func NewGameModel(sess *session.Session, showPotOdds bool) GameModel {
-	ts := sess.TableState()
 	return GameModel{
 		sess:        sess,
-		players:     ts.Players,
-		handNum:     ts.HandNum,
-		blinds:      ts.Blinds,
+		vm:          session.BootstrapGameVM(sess.SessionID, sess.TableState()),
 		showPotOdds: showPotOdds,
 	}
 }
 
 func (m GameModel) Init() tea.Cmd {
-	// Start session in background goroutine
 	go func(sess *session.Session) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -111,38 +60,16 @@ func (m GameModel) Init() tea.Cmd {
 		}()
 		sess.Run()
 	}(m.sess)
-	return tea.Batch(
-		m.waitForSession(),
-	)
+	return m.waitForEnvelope()
 }
 
-func (m GameModel) waitForSession() tea.Cmd {
+func (m GameModel) waitForEnvelope() tea.Cmd {
 	return func() tea.Msg {
-		// Phase 1: drain any buffered Events first so that state
-		// updates (e.g. action_taken overwriting bot_thinking) are
-		// always processed before an ActionReq prompt.
-		select {
-		case ev, ok := <-m.sess.Events:
-			if !ok {
-				return sessionDoneMsg{}
-			}
-			return sessionEventMsg(ev)
-		default:
+		env, ok := <-m.sess.Updates
+		if !ok {
+			return sessionDoneMsg{}
 		}
-
-		// Phase 2: nothing buffered — wait on both channels.
-		select {
-		case ev, ok := <-m.sess.Events:
-			if !ok {
-				return sessionDoneMsg{}
-			}
-			return sessionEventMsg(ev)
-		case ar, ok := <-m.sess.ActionReq:
-			if !ok {
-				return sessionDoneMsg{}
-			}
-			return actionReqMsg(ar)
-		}
+		return envelopeMsg(env)
 	}
 }
 
@@ -151,28 +78,21 @@ func (m GameModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-
-	case sessionEventMsg:
-		return m.handleSessionEvent(session.SessionEvent(msg))
-
-	case actionReqMsg:
-		return m.handleActionReq(session.ActionRequest(msg))
-
+	case envelopeMsg:
+		return m.handleEnvelope(session.Envelope(msg))
 	case sessionDoneMsg:
-		m.finished = true
-		if m.result == "" {
-			m.result = "Session ended."
+		if !m.vm.Finished && m.vm.Result == "" {
+			m.vm.Finished = true
+			m.vm.Result = "Session ended."
 		}
 		return m, nil
-
 	case tickAnimationMsg:
-		return m.advanceAnimation()
-
+		return m, nil
 	case tea.KeyMsg:
 		if m.paused {
 			return m.handlePauseKey(msg)
 		}
-		if m.finished {
+		if m.vm.Finished {
 			return m, func() tea.Msg { return switchScreenMsg{screen: ScreenResults} }
 		}
 		return m.handleGameKey(msg)
@@ -180,190 +100,68 @@ func (m GameModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m GameModel) handleSessionEvent(ev session.SessionEvent) (tea.Model, tea.Cmd) {
-	// Authoritatively clear action state on every non-prompt event.
-	// Only handleActionReq sets needsAction back to true.
-	m.needsAction = false
-	m.betMode = false
-	m.lastAction = ""
+func (m GameModel) handleEnvelope(env session.Envelope) (tea.Model, tea.Cmd) {
+	prev := m.vm
+	m.vm = session.ReduceGameVM(m.vm, env)
+	if m.vm.Prompt == nil {
+		m.betMode = false
+		m.betInput = ""
+	}
+	m.applyEnvelopeAudio(env, prev)
+	if env.IsTerminal() {
+		return m, nil
+	}
+	return m, m.waitForEnvelope()
+}
 
-	switch ev.Type {
-	case "hand_started":
-		if e, ok := ev.Event.(engine.HandStartedEvent); ok {
-			m.dealerSeat = e.DealerSeat
-			m.blinds = e.Blinds
-			m.board = nil
-			m.pot = 0
-			m.showdown = false
-			m.revealed = nil
-			m.potAwards = nil
-			m.myBet = 0
-			m.lastAction = ""
+func (m *GameModel) applyEnvelopeAudio(env session.Envelope, prev session.GameVM) {
+	if env.Notice != nil {
+		switch env.Notice.Type {
+		case "hand_started":
 			m.handSoundState = handSoundState{}
-		}
-		m.applySnapshot(ev.Snapshot)
-
-	case "blind_posted":
-		if e, ok := ev.Event.(engine.BlindsPostedEvent); ok {
-			name := m.sess.PlayerName(e.PlayerID)
-			blind := "SB"
-			if e.Type == engine.BlindBig {
-				blind = "BB"
-			} else if e.Type == engine.BlindAnte {
-				blind = "ante"
+		case "hole_cards_dealt":
+			if dealt, ok := env.Notice.Event.(engine.HoleCardsDealtEvent); ok && dealt.PlayerID == m.sess.HumanID && !m.handSoundState.holeCuePlayed {
+				playGameSound(audio.SoundHoleCards)
+				m.handSoundState.holeCuePlayed = true
 			}
-			m.lastAction = fmt.Sprintf("%s posts %s %s", name, blind, ChipStr(e.Amount))
-		}
-
-	case "hole_cards_dealt":
-		if e, ok := ev.Event.(engine.HoleCardsDealtEvent); ok {
-			if e.PlayerID == m.sess.HumanID {
-				m.myCards = e.Cards
-				if !m.handSoundState.holeCuePlayed {
-					playGameSound(audio.SoundHoleCards)
-					m.handSoundState.holeCuePlayed = true
+		case "action_taken":
+			if actionTaken, ok := env.Notice.Event.(engine.ActionTakenEvent); ok {
+				if sound, ok := m.soundForAction(actionTaken); ok {
+					playGameSound(sound)
 				}
 			}
-		}
-
-	case "action_taken":
-		if e, ok := ev.Event.(engine.ActionTakenEvent); ok {
-			name := m.sess.PlayerName(e.PlayerID)
-			actStr := ActionStr(e.Action.Type)
-			if e.Action.Amount > 0 {
-				m.lastAction = fmt.Sprintf("%s %s %s", name, actStr, ChipStr(e.Action.Amount))
-			} else {
-				m.lastAction = fmt.Sprintf("%s %s", name, actStr)
+		case "street_advanced":
+			if advanced, ok := env.Notice.Event.(engine.StreetAdvancedEvent); ok {
+				playGameSound(streetAdvanceSound(advanced))
 			}
-			m.pot = e.PotTotal
-			if sound, ok := m.soundForAction(e); ok {
-				playGameSound(sound)
-			}
-		}
-		m.applySnapshot(ev.Snapshot)
-
-	case "street_advanced":
-		if e, ok := ev.Event.(engine.StreetAdvancedEvent); ok {
-			m.board = append(m.board, e.NewCards...)
-			m.street = e.Street
-			m.myBet = 0
-			playGameSound(streetAdvanceSound(e))
-		}
-		m.applySnapshot(ev.Snapshot)
-
-	case "showdown_started":
-		m.showdown = true
-		playGameSound(audio.SoundShowdown)
-
-	case "hand_revealed":
-		if e, ok := ev.Event.(engine.HandRevealedEvent); ok {
-			m.revealed = append(m.revealed, revealedHand{
-				playerID: e.PlayerID,
-				name:     m.sess.PlayerName(e.PlayerID),
-				cards:    e.Cards,
-				eval:     e.Eval.Name,
-			})
-		}
-
-	case "pot_awarded":
-		if e, ok := ev.Event.(engine.PotAwardedEvent); ok {
-			names := make([]string, len(e.Winners))
-			for i, pid := range e.Winners {
-				names[i] = m.sess.PlayerName(pid)
-			}
-			m.potAwards = append(m.potAwards, fmt.Sprintf("%s wins %s", strings.Join(names, ", "), ChipStr(e.Amount)))
-			if m.humanWonPot(e.Winners) && !m.handSoundState.potCuePlayed {
+		case "showdown_started":
+			playGameSound(audio.SoundShowdown)
+		case "pot_awarded":
+			if awarded, ok := env.Notice.Event.(engine.PotAwardedEvent); ok && m.humanWonPot(awarded.Winners) && !m.handSoundState.potCuePlayed {
 				playGameSound(audio.SoundPotWon)
 				m.handSoundState.potCuePlayed = true
 			}
-		}
-
-	case "player_eliminated":
-		if e, ok := ev.Event.(engine.PlayerEliminatedEvent); ok {
-			name := m.sess.PlayerName(e.PlayerID)
-			m.setMessage(fmt.Sprintf("%s eliminated (#%d)", name, e.Position))
-			if m.shouldPlayBustout(e) {
+		case "player_eliminated":
+			if eliminated, ok := env.Notice.Event.(engine.PlayerEliminatedEvent); ok && m.shouldPlayBustout(eliminated) {
 				playGameSound(audio.SoundBustout)
 				m.handSoundState.bustCuePlayed = true
 			}
+		case "blind_level_changed":
+			playGameSound(audio.SoundBlindIncrease)
+		case "waiting_for_human":
+			if prev.Prompt == nil && m.vm.Prompt != nil {
+				playGameSound(audio.SoundYourTurn)
+			}
+		case "tournament_finished", "session_ended":
+			playGameSound(m.sessionEndSound(env))
 		}
-
-	case "blind_level_changed":
-		m.setMessage(ev.Message)
-		playGameSound(audio.SoundBlindIncrease)
-		m.applySnapshot(ev.Snapshot)
-
-	case "hand_complete":
-		m.handNum++
-		m.applySnapshot(ev.Snapshot)
-
-	case "hand_summary":
-		m.applySnapshot(ev.Snapshot)
-
-	case "action_error":
-		m.setMessage(ev.Message)
-		playGameSound(audio.SoundInvalidAction)
-		return m, m.waitForSession()
-
-	case "session_error":
-		m.finished = true
-		m.result = ev.Message
-		return m, nil
-
-	case "bot_thinking":
-		if ev.ThinkTime > 0 {
-			m.lastAction = fmt.Sprintf("%s is thinking...", ev.BotName)
+	}
+	if env.Error != nil {
+		switch env.Error.Code {
+		case "invalid_action", "stale_action":
+			playGameSound(audio.SoundInvalidAction)
 		}
-
-	case "tournament_finished", "session_ended":
-		m.finished = true
-		m.result = ev.Message
-		playGameSound(m.sessionEndSound(ev))
-		return m, nil
-
-	case "waiting_for_human":
-		m.applySnapshot(ev.Snapshot)
-		playGameSound(audio.SoundYourTurn)
 	}
-
-	return m, m.waitForSession()
-}
-
-func (m *GameModel) handleActionReq(req session.ActionRequest) (tea.Model, tea.Cmd) {
-	m.needsAction = true
-	ar := req
-	m.actionReq = &ar
-	m.legalActions = req.LegalActions
-	m.betInput = ""
-	m.betMode = false
-
-	// Clear stale bot "thinking" messages so they don't linger
-	// in the action bar while the human prompt is active.
-	if strings.HasSuffix(m.lastAction, "thinking...") {
-		m.lastAction = ""
-	}
-
-	// Update display from view
-	m.myCards = req.View.MyCards
-	m.myStack = req.View.MyStack
-	m.myBet = req.View.MyBet
-	m.pot = req.View.Pot
-	m.street = req.View.Street
-	m.board = req.View.Board
-	m.applySnapshot(req.Snapshot)
-
-	// Calculate pot odds
-	toCall := req.View.CurrentBet - req.View.MyBet
-	if m.showPotOdds && toCall > 0 {
-		odds := float64(req.View.Pot+toCall) / float64(toCall)
-		pct := 100.0 / odds
-		m.potOddsStr = fmt.Sprintf("Pot: %s | Call: %s | Odds: %.1f:1 (%.1f%%)",
-			ChipStr(req.View.Pot), ChipStr(toCall), odds-1, pct)
-	} else {
-		m.potOddsStr = ""
-	}
-
-	return *m, nil
 }
 
 func (m GameModel) soundForAction(e engine.ActionTakenEvent) (audio.SoundType, bool) {
@@ -409,40 +207,34 @@ func (m GameModel) shouldPlayBustout(e engine.PlayerEliminatedEvent) bool {
 	return m.sess.Config.Mode != engine.ModeCashGame
 }
 
-func (m GameModel) sessionEndSound(ev session.SessionEvent) audio.SoundType {
-	if m.didHumanWinSession(ev) {
+func (m GameModel) sessionEndSound(env session.Envelope) audio.SoundType {
+	if m.didHumanWinSession(env) {
 		return audio.SoundVictory
 	}
 	return audio.SoundDefeat
 }
 
-func (m GameModel) didHumanWinSession(ev session.SessionEvent) bool {
-	switch ev.Type {
+func (m GameModel) didHumanWinSession(env session.Envelope) bool {
+	if env.Notice == nil {
+		return false
+	}
+	switch env.Notice.Type {
 	case "tournament_finished":
-		if e, ok := ev.Event.(engine.TournamentFinishedEvent); ok {
-			for _, result := range e.Results {
+		if finished, ok := env.Notice.Event.(engine.TournamentFinishedEvent); ok {
+			for _, result := range finished.Results {
 				if result.PlayerID == m.sess.HumanID {
 					return result.Position == 1
 				}
 			}
 		}
 	case "session_ended":
-		human := m.findPlayer(m.sess.HumanID)
-		if human == nil {
-			return false
+		for _, player := range m.vm.Players {
+			if player.ID == m.sess.HumanID {
+				return player.Stack >= m.sess.Config.CashGameBuyIn
+			}
 		}
-		return human.Stack >= m.sess.Config.CashGameBuyIn
 	}
 	return false
-}
-
-func (m GameModel) findPlayer(pid engine.PlayerID) *session.PlayerInfo {
-	for i := range m.players {
-		if m.players[i].ID == pid {
-			return &m.players[i]
-		}
-	}
-	return nil
 }
 
 func streetAdvanceSound(e engine.StreetAdvancedEvent) audio.SoundType {
@@ -458,7 +250,7 @@ func (m GameModel) handleGameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if !m.needsAction {
+	if !m.vm.HasPrompt() {
 		return m, nil
 	}
 
@@ -467,48 +259,46 @@ func (m GameModel) handleGameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
-	case "q": // Fold
+	case "q":
 		if m.hasLegal(engine.ActionFold) {
 			return m.submitAction(engine.Action{Type: engine.ActionFold})
 		}
-		m.setMessage("Can't fold — checking is free.")
 		return m, nil
-	case "w": // Check
+	case "w":
 		if m.hasLegal(engine.ActionCheck) {
 			return m.submitAction(engine.Action{Type: engine.ActionCheck})
 		}
-	case "e": // Call
+	case "e":
 		if m.hasLegal(engine.ActionCall) {
 			return m.submitAction(engine.Action{Type: engine.ActionCall})
 		}
 		if m.hasLegal(engine.ActionCheck) {
 			return m.submitAction(engine.Action{Type: engine.ActionCheck})
 		}
-	case "t": // Raise/Bet - enter bet mode
+	case "t":
 		if m.hasLegal(engine.ActionRaise) || m.hasLegal(engine.ActionBet) {
 			m.betMode = true
 			m.betInput = ""
-			// Pre-fill with minimum raise
-			for _, la := range m.legalActions {
-				if la.Type == engine.ActionRaise || la.Type == engine.ActionBet {
-					m.betInput = strconv.Itoa(la.MinAmount)
+			for _, legal := range m.vm.Prompt.LegalActions {
+				if legal.Type == engine.ActionRaise || legal.Type == engine.ActionBet {
+					m.betInput = strconv.Itoa(legal.MinAmount)
 					break
 				}
 			}
-			return m, nil
 		}
-	case "a": // All-in
+		return m, nil
+	case "a":
 		if m.hasLegal(engine.ActionAllIn) {
 			return m.submitAction(engine.Action{Type: engine.ActionAllIn})
 		}
 	case "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
-		// Start bet mode with this digit
 		if m.hasLegal(engine.ActionRaise) || m.hasLegal(engine.ActionBet) {
 			m.betMode = true
 			m.betInput = msg.String()
-			return m, nil
 		}
+		return m, nil
 	}
+
 	return m, nil
 }
 
@@ -522,12 +312,12 @@ func (m GameModel) handleBetInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		amount, err := strconv.Atoi(m.betInput)
 		if err != nil || amount <= 0 {
 			m.betMode = false
+			m.betInput = ""
 			return m, nil
 		}
-		// Determine if this is a bet or raise
 		actType := engine.ActionRaise
-		for _, la := range m.legalActions {
-			if la.Type == engine.ActionBet {
+		for _, legal := range m.vm.Prompt.LegalActions {
+			if legal.Type == engine.ActionBet {
 				actType = engine.ActionBet
 				break
 			}
@@ -548,51 +338,32 @@ func (m GameModel) handleBetInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m GameModel) submitAction(action engine.Action) (tea.Model, tea.Cmd) {
-	if !m.needsAction {
+	if m.vm.Prompt == nil {
 		return m, nil
 	}
-	m.needsAction = false
 	m.betMode = false
-	m.potOddsStr = ""
-	m.lastAction = ""
-
+	m.betInput = ""
+	prompt := m.vm.Prompt
 	return m, func() tea.Msg {
-		m.sess.ActionResp <- action
-		return m.waitForSession()()
+		m.sess.ActionResp <- session.PlayerActionIntent{
+			PromptSeq: prompt.Seq,
+			HandID:    prompt.HandID,
+			Action:    action,
+		}
+		return m.waitForEnvelope()()
 	}
 }
 
-func (m *GameModel) hasLegal(t engine.ActionType) bool {
-	for _, la := range m.legalActions {
-		if la.Type == t {
+func (m GameModel) hasLegal(actionType engine.ActionType) bool {
+	if m.vm.Prompt == nil {
+		return false
+	}
+	for _, legal := range m.vm.Prompt.LegalActions {
+		if legal.Type == actionType {
 			return true
 		}
 	}
 	return false
-}
-
-func (m *GameModel) applySnapshot(ts session.TableState) {
-	if ts.Players == nil {
-		return
-	}
-	m.players = ts.Players
-	m.handNum = ts.HandNum
-	m.blinds = ts.Blinds
-	for _, p := range ts.Players {
-		if p.IsHuman {
-			m.myStack = p.Stack
-			break
-		}
-	}
-}
-
-func (m *GameModel) setMessage(msg string) {
-	m.message = msg
-	m.msgExpiry = time.Now().Add(4 * time.Second)
-}
-
-func (m GameModel) advanceAnimation() (tea.Model, tea.Cmd) {
-	return m, nil
 }
 
 func (m GameModel) handlePauseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -600,8 +371,6 @@ func (m GameModel) handlePauseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "escape", "esc", "p":
 		m.paused = false
 	case "s":
-		// TODO: Save game
-		m.setMessage("Game saved!")
 		m.paused = false
 	case "q":
 		m.sess.Stop()
@@ -622,20 +391,15 @@ func (m GameModel) View() string {
 		return m.renderPauseOverlay()
 	}
 
-	if m.finished {
+	if m.vm.Finished {
 		return m.renderFinished()
 	}
 
-	header := m.renderHeader()
-	table := m.renderTable()
-	actionBar := m.renderActionBar()
-
 	content := lipgloss.JoinVertical(lipgloss.Left,
-		header,
-		table,
-		actionBar,
+		m.renderHeader(),
+		m.renderTable(),
+		m.renderActionBar(),
 	)
-
 	return content
 }
 
@@ -648,81 +412,65 @@ func (m GameModel) renderHeader() string {
 		modeStr = "Heads-Up"
 	}
 
-	left := StyleBold.Render(fmt.Sprintf("ANTE  Hand #%d", m.handNum))
-	mid := StyleDim.Render(fmt.Sprintf("Blinds %d/%d", m.blinds.SB, m.blinds.BB))
-	if m.blinds.Ante > 0 {
-		mid += StyleDim.Render(fmt.Sprintf(" (ante %d)", m.blinds.Ante))
+	left := StyleBold.Render(fmt.Sprintf("ANTE  Hand #%d", m.vm.HandNum))
+	mid := StyleDim.Render(fmt.Sprintf("Blinds %d/%d", m.vm.Blinds.SB, m.vm.Blinds.BB))
+	if m.vm.Blinds.Ante > 0 {
+		mid += StyleDim.Render(fmt.Sprintf(" (ante %d)", m.vm.Blinds.Ante))
 	}
-	right := StyleInfo.Render(modeStr) + "  " + StyleChips.Render(fmt.Sprintf("Stack: %s", ChipStr(m.myStack)))
+	right := StyleInfo.Render(modeStr) + "  " + StyleChips.Render(fmt.Sprintf("Stack: %s", ChipStr(m.vm.MyStack)))
 
-	w := m.width
-	gap := w - lipgloss.Width(left) - lipgloss.Width(mid) - lipgloss.Width(right)
+	gap := m.width - lipgloss.Width(left) - lipgloss.Width(mid) - lipgloss.Width(right)
 	if gap < 2 {
 		gap = 2
 	}
 	header := left + strings.Repeat(" ", gap/2) + mid + strings.Repeat(" ", gap-gap/2) + right
-	return StyleHeader.Width(w).Render(header)
+	return StyleHeader.Width(m.width).Render(header)
 }
 
 func (m GameModel) renderTable() string {
-	w := m.width
-	// Calculate available height: total - header(2) - action bar(3) - footer(2)
 	tableH := m.height - 8
 	if tableH < 16 {
 		tableH = 16
 	}
 
-	// Separate players into rows
-	humanPlayer, opponents := m.splitPlayers()
-
-	// Top row(s) of opponents
-	topRow := m.renderOpponentArea(opponents, w)
-	// Middle: board + pot
-	boardRow := m.renderBoardArea(w)
-	// Bottom: human player
-	humanRow := m.renderHumanArea(humanPlayer, w)
-
-	// Add showdown info if applicable
-	showdownInfo := ""
-	if m.showdown && len(m.revealed) > 0 {
-		showdownInfo = m.renderShowdown()
+	human, opponents := m.splitPlayers()
+	parts := []string{m.renderOpponentArea(opponents, m.width)}
+	if m.vm.Showdown && len(m.vm.Revealed) > 0 {
+		parts = append(parts, m.renderShowdown())
 	}
-
-	// Compose table
-	var parts []string
-	parts = append(parts, topRow)
-	if showdownInfo != "" {
-		parts = append(parts, showdownInfo)
+	parts = append(parts, m.renderBoardArea(m.width), m.renderHumanArea(human, m.width))
+	if m.vm.Message != "" {
+		parts = append(parts, CenterH(m.width).Render(m.renderMessage()))
 	}
-	parts = append(parts, boardRow)
-	parts = append(parts, humanRow)
-
-	// Add message if present
-	if m.message != "" && time.Now().Before(m.msgExpiry) {
-		parts = append(parts, CenterH(w).Render(StyleInfo.Render(m.message)))
-	}
-
 	table := lipgloss.JoinVertical(lipgloss.Left, parts...)
-
-	// Pad to fill available height
 	tableLines := strings.Count(table, "\n") + 1
 	if tableLines < tableH {
 		table += strings.Repeat("\n", tableH-tableLines)
 	}
-
 	return table
+}
+
+func (m GameModel) renderMessage() string {
+	if m.vm.MessageKind == session.MessageKindError {
+		return StyleError.Render(m.vm.Message)
+	}
+	return StyleInfo.Render(m.vm.Message)
 }
 
 func (m GameModel) splitPlayers() (*session.PlayerInfo, []session.PlayerInfo) {
 	var human *session.PlayerInfo
-	var opponents []session.PlayerInfo
-	for i := range m.players {
-		if m.players[i].IsHuman {
-			h := m.players[i]
+	opponents := make([]session.PlayerInfo, 0, len(m.vm.Players))
+	for i := range m.vm.Players {
+		player := m.vm.Players[i]
+		if player.IsHuman {
+			h := player
 			human = &h
-		} else if m.players[i].Status != engine.StatusOut && m.players[i].Status != engine.StatusSittingOut {
-			opponents = append(opponents, m.players[i])
+			continue
 		}
+		if player.Status == engine.StatusOut || player.Status == engine.StatusSittingOut {
+			continue
+		}
+		opponents = append(opponents, player)
 	}
 	return human, opponents
 }
@@ -731,129 +479,100 @@ func (m GameModel) renderOpponentArea(opponents []session.PlayerInfo, width int)
 	if len(opponents) == 0 {
 		return ""
 	}
-
-	var seats []string
-	for _, opp := range opponents {
-		seats = append(seats, m.renderSeat(opp))
+	seats := make([]string, 0, len(opponents))
+	for _, opponent := range opponents {
+		seats = append(seats, m.renderSeat(opponent))
 	}
-
-	// Calculate how many seats fit per row
 	maxPerRow := (width + SeatGap) / (SeatTotalWidth + SeatGap)
 	if maxPerRow < 1 {
 		maxPerRow = 1
 	}
-
-	// Split into rows if needed
-	var rows []string
+	rows := make([]string, 0, (len(seats)+maxPerRow-1)/maxPerRow)
 	for i := 0; i < len(seats); i += maxPerRow {
 		end := i + maxPerRow
 		if end > len(seats) {
 			end = len(seats)
 		}
-		row := joinSeats(seats[i:end], width)
-		rows = append(rows, row)
+		rows = append(rows, joinSeats(seats[i:end], width))
 	}
-
 	return strings.Join(rows, "\n")
 }
 
-// joinSeats horizontally joins seat blocks with SeatGap spacing, centered in width.
 func joinSeats(seats []string, width int) string {
 	if len(seats) == 0 {
 		return ""
 	}
-
 	parts := make([]string, 0, len(seats))
-	for i, s := range seats {
-		seat := s
+	for i, seat := range seats {
 		if i < len(seats)-1 {
 			seat = lipgloss.NewStyle().MarginRight(SeatGap).Render(seat)
 		}
 		parts = append(parts, seat)
 	}
-
-	joined := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
-	return lipgloss.PlaceHorizontal(width, lipgloss.Center, joined)
+	return lipgloss.PlaceHorizontal(width, lipgloss.Center, lipgloss.JoinHorizontal(lipgloss.Top, parts...))
 }
 
-func (m GameModel) renderSeat(p session.PlayerInfo) string {
-	isFolded := p.Status == engine.StatusFolded
-	isAllIn := p.Status == engine.StatusAllIn
-	isOut := p.Status == engine.StatusOut || p.Status == engine.StatusSittingOut
-	isDealer := p.Seat == m.dealerSeat
+func (m GameModel) renderSeat(player session.PlayerInfo) string {
+	isFolded := player.Status == engine.StatusFolded
+	isAllIn := player.Status == engine.StatusAllIn
+	isOut := player.Status == engine.StatusOut || player.Status == engine.StatusSittingOut
+	isDealer := player.Seat == m.vm.DealerSeat
 
-	// Line 1: Name + dealer badge
-	nameLine := p.Name
+	nameLine := player.Name
 	if isDealer {
 		badge := " " + StyleDealer.Render("D")
-		maxName := SeatContentWidth - 2 // room for " D"
-		runes := []rune(p.Name)
+		maxName := SeatContentWidth - 2
+		runes := []rune(player.Name)
 		if len(runes) > maxName {
-			nameLine = string(runes[:maxName-1]) + "…"
+			nameLine = string(runes[:maxName-1]) + "..."
 		}
 		nameLine += badge
 	} else if lipgloss.Width(nameLine) > SeatContentWidth {
-		runes := []rune(p.Name)
+		runes := []rune(player.Name)
 		if len(runes) > SeatContentWidth-1 {
-			nameLine = string(runes[:SeatContentWidth-1]) + "…"
+			nameLine = string(runes[:SeatContentWidth-1]) + "..."
 		}
 	}
 
-	// Line 2: Stack
 	if isOut {
-		content := strings.Join([]string{nameLine, ChipStr(p.Stack), "OUT", ""}, "\n")
-		return lipgloss.NewStyle().
-			Width(SeatTotalWidth).
-			Height(SeatHeight).
-			Padding(0, 1).
-			Foreground(ColorDim).
-			Render(content)
+		content := strings.Join([]string{nameLine, ChipStr(player.Stack), "OUT", ""}, "\n")
+		return lipgloss.NewStyle().Width(SeatTotalWidth).Height(SeatHeight).Padding(0, 1).Foreground(ColorDim).Render(content)
 	}
-	stackLine := StyleChips.Render(ChipStr(p.Stack))
 
-	// Line 3: Status / Bet
-	var statusLine string
+	stackLine := StyleChips.Render(ChipStr(player.Stack))
+	statusLine := ""
 	if isFolded {
 		statusLine = StyleFolded.Render("FOLDED")
 	} else if isAllIn {
 		statusLine = StyleAllIn.Render("ALL-IN")
-	} else if p.Bet > 0 {
-		statusLine = StyleBet.Render("Bet: " + ChipStr(p.Bet))
+	} else if player.Bet > 0 {
+		statusLine = StyleBet.Render("Bet: " + ChipStr(player.Bet))
 	}
 
-	// Line 4: Cards
 	cardLine := ""
 	if !isFolded {
 		cardLine = "[" + CardBack() + "][" + CardBack() + "]"
-		for _, rev := range m.revealed {
-			if rev.playerID == p.ID {
-				cardLine = RenderHoleCards(rev.cards, true)
+		for _, revealed := range m.vm.Revealed {
+			if revealed.PlayerID == player.ID {
+				cardLine = RenderHoleCards(revealed.Cards, true)
 				break
 			}
 		}
 	}
 
 	style := SeatStyle(true, false, isFolded, isAllIn, isDealer)
-
-	// Always 4 content lines; SeatStyle Height(5) pads to uniform block.
 	content := strings.Join([]string{nameLine, stackLine, statusLine, cardLine}, "\n")
 	return style.Render(content)
 }
 
 func (m GameModel) renderBoardArea(width int) string {
-	// Community cards
-	boardStr := RenderBoardLarge(m.board)
-
-	// Pot
-	potLine := StylePot.Render(fmt.Sprintf("Pot: %s", ChipStr(m.pot)))
-
-	// Street
-	streetLine := StyleDim.Render(StreetStr(m.street))
-
 	content := lipgloss.JoinVertical(lipgloss.Center,
-		"", boardStr, potLine, streetLine, "",
+		"",
+		RenderBoardLarge(m.vm.Board),
+		StylePot.Render(fmt.Sprintf("Pot: %s", ChipStr(m.vm.Pot))),
+		StyleDim.Render(StreetStr(m.vm.Street)),
+		"",
 	)
-
 	return CenterH(width).Render(content)
 }
 
@@ -861,22 +580,16 @@ func (m GameModel) renderHumanArea(human *session.PlayerInfo, width int) string 
 	if human == nil {
 		return ""
 	}
-
 	label := StyleHumanLabel.Render("* " + human.Name + " *")
-	cards := RenderBigCards(m.myCards)
-	stack := StyleChips.Render(fmt.Sprintf("Stack: %s", ChipStr(m.myStack)))
-
+	stack := StyleChips.Render(fmt.Sprintf("Stack: %s", ChipStr(m.vm.MyStack)))
 	betStr := ""
-	if m.myBet > 0 {
-		betStr = StyleDim.Render(fmt.Sprintf("Bet: %s", ChipStr(m.myBet)))
+	if m.vm.MyBet > 0 {
+		betStr = StyleDim.Render(fmt.Sprintf("Bet: %s", ChipStr(m.vm.MyBet)))
 	}
-
-	isDealer := human.Seat == m.dealerSeat
 	dealerStr := ""
-	if isDealer {
+	if human.Seat == m.vm.DealerSeat {
 		dealerStr = " " + StyleDealer.Render("D")
 	}
-
 	info := stack
 	if betStr != "" {
 		info += "  " + betStr
@@ -884,72 +597,53 @@ func (m GameModel) renderHumanArea(human *session.PlayerInfo, width int) string 
 	if dealerStr != "" {
 		info += dealerStr
 	}
-
-	content := lipgloss.JoinVertical(lipgloss.Center,
-		label,
-		cards,
-		info,
-	)
-
+	content := lipgloss.JoinVertical(lipgloss.Center, label, RenderBigCards(m.vm.HumanCards), info)
 	return CenterH(width).Render(content)
 }
 
 func (m GameModel) renderShowdown() string {
-	var lines []string
-	for _, rev := range m.revealed {
-		cards := RenderHoleCards(rev.cards, true)
-		line := fmt.Sprintf("  %s: %s  %s", rev.name, cards, StyleHandRank.Render(rev.eval))
-		lines = append(lines, line)
+	lines := make([]string, 0, len(m.vm.Revealed)+len(m.vm.PotAwards))
+	for _, revealed := range m.vm.Revealed {
+		lines = append(lines, fmt.Sprintf("  %s: %s  %s", revealed.Name, RenderHoleCards(revealed.Cards, true), StyleHandRank.Render(revealed.Eval)))
 	}
-	for _, award := range m.potAwards {
+	for _, award := range m.vm.PotAwards {
 		lines = append(lines, "  "+StyleWinner.Render(award))
 	}
 	return strings.Join(lines, "\n")
 }
 
 func (m GameModel) renderActionBar() string {
-	w := m.width
-
-	if !m.needsAction {
-		// Show last action or waiting message
-		info := m.lastAction
+	if m.vm.Prompt == nil {
+		info := m.vm.StatusLine
 		if info == "" {
 			info = "Waiting..."
 		}
-		bar := StyleDim.Render(info)
-		return StyleFooter.Width(w).Render(bar)
+		return StyleFooter.Width(m.width).Render(StyleDim.Render(info))
 	}
 
-	// Pot odds line
-	oddsLine := ""
-	if m.potOddsStr != "" {
-		oddsLine = StyleInfo.Render(m.potOddsStr)
+	extraLine := ""
+	if m.vm.Message != "" {
+		extraLine = m.renderMessage()
+	} else if odds := m.potOddsLine(); odds != "" {
+		extraLine = StyleInfo.Render(odds)
 	}
 
 	if m.betMode {
-		// Bet input mode
-		var minMax string
-		for _, la := range m.legalActions {
-			if la.Type == engine.ActionRaise || la.Type == engine.ActionBet {
-				minMax = fmt.Sprintf("(min: %s  max: %s)", ChipStr(la.MinAmount), ChipStr(la.MaxAmount))
+		minMax := ""
+		for _, legal := range m.vm.Prompt.LegalActions {
+			if legal.Type == engine.ActionRaise || legal.Type == engine.ActionBet {
+				minMax = fmt.Sprintf("(min: %s  max: %s)", ChipStr(legal.MinAmount), ChipStr(legal.MaxAmount))
 				break
 			}
 		}
-
-		betLine := fmt.Sprintf("%s Amount: %s %s  %s",
-			StyleKey.Render("[Enter]"), StyleBold.Render(m.betInput+"_"), minMax,
-			StyleDim.Render("[Esc] Cancel"))
-
-		content := betLine
-		if oddsLine != "" {
-			content = oddsLine + "\n" + betLine
+		betLine := fmt.Sprintf("%s Amount: %s %s  %s", StyleKey.Render("[Enter]"), StyleBold.Render(m.betInput+"_"), minMax, StyleDim.Render("[Esc] Cancel"))
+		if extraLine != "" {
+			return StyleFooter.Width(m.width).Render(extraLine + "\n" + betLine)
 		}
-		return StyleFooter.Width(w).Render(content)
+		return StyleFooter.Width(m.width).Render(betLine)
 	}
 
-	// Normal action bar
-	var actions []string
-
+	actions := make([]string, 0, len(m.vm.Prompt.LegalActions))
 	if m.hasLegal(engine.ActionFold) {
 		actions = append(actions, StyleKey.Render("[Q]")+" Fold")
 	}
@@ -957,9 +651,9 @@ func (m GameModel) renderActionBar() string {
 		actions = append(actions, StyleKey.Render("[W]")+" Check")
 	}
 	if m.hasLegal(engine.ActionCall) {
-		for _, la := range m.legalActions {
-			if la.Type == engine.ActionCall {
-				actions = append(actions, StyleKey.Render("[E]")+" Call "+ChipStr(la.MinAmount))
+		for _, legal := range m.vm.Prompt.LegalActions {
+			if legal.Type == engine.ActionCall {
+				actions = append(actions, StyleKey.Render("[E]")+" Call "+ChipStr(legal.MinAmount))
 				break
 			}
 		}
@@ -970,28 +664,34 @@ func (m GameModel) renderActionBar() string {
 		actions = append(actions, StyleKey.Render("[T]")+" Bet")
 	}
 	if m.hasLegal(engine.ActionAllIn) {
-		for _, la := range m.legalActions {
-			if la.Type == engine.ActionAllIn {
-				allInDisplay := la.MinAmount - m.myBet
-				if allInDisplay < 0 {
-					allInDisplay = 0
-				}
-				actions = append(actions, StyleKey.Render("[A]")+" All-In "+ChipStr(allInDisplay))
+		for _, legal := range m.vm.Prompt.LegalActions {
+			if legal.Type == engine.ActionAllIn {
+				actions = append(actions, StyleKey.Render("[A]")+" All-In "+ChipStr(max(0, legal.MinAmount-m.vm.MyBet)))
 				break
 			}
 		}
 	}
-
 	actionLine := strings.Join(actions, "   ")
-	if m.lastAction != "" {
-		actionLine += "   " + StyleDim.Render("| "+m.lastAction)
+	if m.vm.StatusLine != "" {
+		actionLine += "   " + StyleDim.Render("| "+m.vm.StatusLine)
 	}
+	if extraLine != "" {
+		return StyleFooter.Width(m.width).Render(extraLine + "\n" + actionLine)
+	}
+	return StyleFooter.Width(m.width).Render(actionLine)
+}
 
-	content := actionLine
-	if oddsLine != "" {
-		content = oddsLine + "\n" + actionLine
+func (m GameModel) potOddsLine() string {
+	if !m.showPotOdds || m.vm.Prompt == nil {
+		return ""
 	}
-	return StyleFooter.Width(w).Render(content)
+	toCall := m.vm.Prompt.View.CurrentBet - m.vm.Prompt.View.MyBet
+	if toCall <= 0 {
+		return ""
+	}
+	odds := float64(m.vm.Prompt.View.Pot+toCall) / float64(toCall)
+	pct := 100.0 / odds
+	return fmt.Sprintf("Pot: %s | Call: %s | Odds: %.1f:1 (%.1f%%)", ChipStr(m.vm.Prompt.View.Pot), ChipStr(toCall), odds-1, pct)
 }
 
 func (m GameModel) renderPauseOverlay() string {
@@ -1003,11 +703,10 @@ func (m GameModel) renderPauseOverlay() string {
 			StyleTitle.Render("GAME PAUSED"),
 			"",
 			StyleKey.Render("[Esc]")+" Resume",
-			StyleKey.Render("[S]")+"   Save Game",
+			StyleKey.Render("[S]")+"   Save (next slice)",
 			StyleKey.Render("[H]")+"   Help",
 			StyleKey.Render("[Q]")+"   Quit to Menu",
 		))
-
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, menu)
 }
 
@@ -1016,10 +715,16 @@ func (m GameModel) renderFinished() string {
 		"",
 		StyleTitle.Render("GAME OVER"),
 		"",
-		StyleBold.Render(m.result),
+		StyleBold.Render(m.vm.Result),
 		"",
 		StyleDim.Render("Press any key to continue..."),
 	)
-
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
