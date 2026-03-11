@@ -37,6 +37,7 @@ type GameModel struct {
 
 	showPotOdds      bool
 	paused           bool
+	awaitingAction   bool
 	localMessage     string
 	localMessageKind session.MessageKind
 
@@ -109,6 +110,7 @@ func (m GameModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m GameModel) handleEnvelope(env session.Envelope) (tea.Model, tea.Cmd) {
 	prev := m.vm
 	m.vm = session.ReduceGameVM(m.vm, env)
+	m.awaitingAction = false
 	if m.vm.Prompt == nil {
 		m.betMode = false
 		m.betInput = ""
@@ -118,6 +120,11 @@ func (m GameModel) handleEnvelope(env session.Envelope) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.clearLocalMessage()
+	if m.vm.Prompt != nil {
+		// The session blocks on ActionResp while a human prompt is active, so
+		// leaving another waiter running here would race with submitAction.
+		return m, nil
+	}
 	return m, m.waitForEnvelope()
 }
 
@@ -257,6 +264,10 @@ func (m GameModel) handleGameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.awaitingAction {
+		return m, nil
+	}
+
 	if !m.vm.HasPrompt() {
 		return m, nil
 	}
@@ -350,6 +361,7 @@ func (m GameModel) submitAction(action engine.Action) (tea.Model, tea.Cmd) {
 	}
 	m.betMode = false
 	m.betInput = ""
+	m.awaitingAction = true
 	prompt := m.vm.Prompt
 	return m, func() tea.Msg {
 		m.sess.ActionResp <- session.PlayerActionIntent{
@@ -706,13 +718,38 @@ func (m GameModel) potOddsLine() string {
 	if !m.showPotOdds || m.vm.Prompt == nil {
 		return ""
 	}
-	toCall := m.vm.Prompt.View.CurrentBet - m.vm.Prompt.View.MyBet
-	if toCall <= 0 {
+	effectiveCall, effectivePot := effectivePotOdds(m.vm.Prompt.View)
+	if effectiveCall <= 0 || effectivePot <= 0 {
 		return ""
 	}
-	odds := float64(m.vm.Prompt.View.Pot+toCall) / float64(toCall)
+	odds := float64(effectivePot) / float64(effectiveCall)
 	pct := 100.0 / odds
-	return fmt.Sprintf("Pot: %s | Call: %s | Odds: %.1f:1 (%.1f%%)", ChipStr(m.vm.Prompt.View.Pot), ChipStr(toCall), odds-1, pct)
+	return fmt.Sprintf("Pot: %s | Call: %s | Odds: %.1f:1 (%.1f%%)", ChipStr(effectivePot-effectiveCall), ChipStr(effectiveCall), odds-1, pct)
+}
+
+func effectivePotOdds(view engine.PlayerView) (int, int) {
+	toCall := view.CurrentBet - view.MyBet
+	if toCall <= 0 {
+		return 0, 0
+	}
+
+	effectiveCall := minInt(toCall, view.MyStack)
+	targetBet := view.MyBet + effectiveCall
+	uncalledExcess := 0
+	for _, opponent := range view.Players {
+		switch opponent.Status {
+		case engine.StatusActive, engine.StatusAllIn:
+			if opponent.Bet > targetBet {
+				uncalledExcess += opponent.Bet - targetBet
+			}
+		}
+	}
+
+	effectivePot := view.Pot + effectiveCall - uncalledExcess
+	if effectivePot < effectiveCall {
+		effectivePot = effectiveCall
+	}
+	return effectiveCall, effectivePot
 }
 
 func (m GameModel) renderPauseOverlay() string {
@@ -748,6 +785,13 @@ func (m GameModel) renderFinished() string {
 
 func max(a, b int) int {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
 		return a
 	}
 	return b

@@ -223,3 +223,282 @@ func TestPauseSaveShowsSuccessMessage(t *testing.T) {
 		t.Fatalf("local message kind = %q, want info", next.localMessageKind)
 	}
 }
+
+func TestGamePromptFlowResetsShowdownOnNextHand(t *testing.T) {
+	sess, err := session.New(session.Config{
+		Mode:          engine.ModeTournament,
+		Difficulty:    ai.DifficultyEasy,
+		Seats:         3,
+		StartingStack: 100,
+		PlayerName:    "Hero",
+		Seed:          42,
+	})
+	if err != nil {
+		t.Fatalf("session.New error: %v", err)
+	}
+
+	m := NewGameModel(sess, true)
+	m.width = 120
+	m.height = 40
+	cmd := m.Init()
+
+	sawShowdown := false
+	showdownHandID := 0
+	for step := 0; step < 2000; step++ {
+		if cmd == nil {
+			t.Fatal("unexpected nil command while session still in progress")
+		}
+
+		msg := cmd()
+		env, ok := msg.(envelopeMsg)
+		if !ok {
+			if _, done := msg.(sessionDoneMsg); done {
+				t.Fatal("session ended before observing showdown rollover")
+			}
+			t.Fatalf("unexpected message type %T", msg)
+		}
+
+		model, nextCmd := m.handleEnvelope(session.Envelope(env))
+		m = model.(GameModel)
+
+		if env.Notice != nil {
+			switch env.Notice.Type {
+			case "hand_revealed":
+				sawShowdown = true
+				showdownHandID = env.HandID
+			case "hand_started":
+				if sawShowdown && env.HandID > showdownHandID {
+					if m.vm.Showdown {
+						t.Fatal("expected showdown flag to be cleared on next hand")
+					}
+					if len(m.vm.Revealed) != 0 {
+						t.Fatalf("expected revealed hands to reset, got %d", len(m.vm.Revealed))
+					}
+					if len(m.vm.PotAwards) != 0 {
+						t.Fatalf("expected pot awards to reset, got %d", len(m.vm.PotAwards))
+					}
+					return
+				}
+			}
+		}
+
+		if env.Prompt != nil {
+			if nextCmd != nil {
+				t.Fatal("expected no waiter while a human prompt is active")
+			}
+			model, submitCmd := m.submitAction(defaultGameAction(env.Prompt))
+			m = model.(GameModel)
+			if submitCmd == nil {
+				t.Fatal("expected submitAction to arm the next waiter")
+			}
+			cmd = submitCmd
+			continue
+		}
+
+		if session.Envelope(env).IsTerminal() {
+			t.Fatal("session terminated before next hand started after a showdown")
+		}
+		cmd = nextCmd
+	}
+
+	t.Fatal("did not observe showdown state resetting on the next hand")
+}
+
+func TestGameIgnoresAdditionalInputWhileAwaitingActionResult(t *testing.T) {
+	m := newGameTestModel(t)
+	m.vm.Prompt = &session.Prompt{
+		Seq:      10,
+		HandID:   4,
+		PlayerID: m.sess.HumanID,
+		LegalActions: []engine.LegalAction{
+			{Type: engine.ActionFold},
+			{Type: engine.ActionCall, MinAmount: 10, MaxAmount: 10},
+		},
+	}
+
+	model, cmd := m.submitAction(engine.Action{Type: engine.ActionCall})
+	next := model.(GameModel)
+	if !next.awaitingAction {
+		t.Fatal("expected model to enter awaitingAction state after submitAction")
+	}
+	if cmd == nil {
+		t.Fatal("expected submitAction to return a waiter command")
+	}
+
+	blockedModel, blockedCmd := next.handleGameKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	blocked := blockedModel.(GameModel)
+	if !blocked.awaitingAction {
+		t.Fatal("expected awaitingAction state to remain active while waiting for envelope")
+	}
+	if blockedCmd != nil {
+		t.Fatal("expected no second command while awaiting action result")
+	}
+}
+
+func TestGamePotOddsUsesEffectiveCallForShortStack(t *testing.T) {
+	m := newGameTestModel(t)
+	m.vm.Prompt = &session.Prompt{
+		View: engine.PlayerView{
+			MyID:       m.sess.HumanID,
+			MyStack:    15,
+			MyBet:      0,
+			Pot:        500,
+			CurrentBet: 300,
+			Players: []engine.OpponentView{
+				{ID: 2, Name: "Bot", Bet: 300, Status: engine.StatusActive},
+			},
+		},
+		LegalActions: []engine.LegalAction{
+			{Type: engine.ActionFold},
+			{Type: engine.ActionAllIn, MinAmount: 15, MaxAmount: 15},
+		},
+	}
+
+	line := m.potOddsLine()
+	if !strings.Contains(line, "Pot: 215") {
+		t.Fatalf("expected effective contestable pot, got %q", line)
+	}
+	if !strings.Contains(line, "Call: 15") {
+		t.Fatalf("expected effective call amount, got %q", line)
+	}
+	if !strings.Contains(line, "Odds: 14.3:1") {
+		t.Fatalf("expected effective odds, got %q", line)
+	}
+}
+
+func TestGamePotOddsUsesAllInAmountWhenCallEqualsStack(t *testing.T) {
+	m := newGameTestModel(t)
+	m.vm.Prompt = &session.Prompt{
+		View: engine.PlayerView{
+			MyID:       m.sess.HumanID,
+			MyStack:    50,
+			MyBet:      0,
+			Pot:        120,
+			CurrentBet: 50,
+			Players: []engine.OpponentView{
+				{ID: 2, Name: "Bot", Bet: 50, Status: engine.StatusActive},
+			},
+		},
+		LegalActions: []engine.LegalAction{
+			{Type: engine.ActionFold},
+			{Type: engine.ActionAllIn, MinAmount: 50, MaxAmount: 50},
+		},
+	}
+
+	line := m.potOddsLine()
+	if !strings.Contains(line, "Pot: 120") {
+		t.Fatalf("expected full contestable pot before the all-in call, got %q", line)
+	}
+	if !strings.Contains(line, "Call: 50") {
+		t.Fatalf("expected exact all-in call amount, got %q", line)
+	}
+}
+
+func TestGamePotOddsDiscountsUncoverableOpponentExcess(t *testing.T) {
+	m := newGameTestModel(t)
+	m.vm.Prompt = &session.Prompt{
+		View: engine.PlayerView{
+			MyID:       m.sess.HumanID,
+			MyStack:    40,
+			MyBet:      10,
+			Pot:        210,
+			CurrentBet: 110,
+			Players: []engine.OpponentView{
+				{ID: 2, Name: "Bot A", Bet: 110, Status: engine.StatusActive},
+				{ID: 3, Name: "Bot B", Bet: 160, Status: engine.StatusAllIn},
+			},
+		},
+		LegalActions: []engine.LegalAction{{Type: engine.ActionFold}, {Type: engine.ActionAllIn, MinAmount: 50, MaxAmount: 50}},
+	}
+
+	line := m.potOddsLine()
+	if !strings.Contains(line, "Call: 40") {
+		t.Fatalf("expected effective call amount to be capped by stack, got %q", line)
+	}
+	if !strings.Contains(line, "Pot: 40") {
+		t.Fatalf("expected pot display to discount uncoverable excess, got %q", line)
+	}
+}
+
+func TestGameRenderSeatShowsStreetBetWhileActionBarShowsCallDelta(t *testing.T) {
+	m := newGameTestModel(t)
+	snapshot := session.TableState{
+		HandNum:    25,
+		HandID:     25,
+		Blinds:     engine.BlindLevel{SB: 3, BB: 6, Ante: 1},
+		DealerSeat: 0,
+		Street:     engine.StreetPreflop,
+		Pot:        24,
+		HumanCards: [2]engine.Card{engine.NewCard(engine.Jack, engine.Clubs), engine.NewCard(engine.King, engine.Spades)},
+		Players: []session.PlayerInfo{
+			{ID: m.sess.HumanID, Name: "Hero", Stack: 502, Bet: 7, IsHuman: true, Seat: 0},
+			{ID: 2, Name: "Carlos Rivera", Stack: 674, Bet: 17, Seat: 1},
+		},
+	}
+
+	m = applyEnvelopeToGame(t, m, session.Envelope{
+		Seq:       1,
+		SessionID: m.sess.SessionID,
+		HandID:    25,
+		Snapshot:  snapshot,
+		Prompt: &session.Prompt{
+			Seq:      1,
+			HandID:   25,
+			PlayerID: m.sess.HumanID,
+			View: engine.PlayerView{
+				MyID:       m.sess.HumanID,
+				MyCards:    snapshot.HumanCards,
+				MyStack:    502,
+				MyBet:      7,
+				Pot:        24,
+				CurrentBet: 17,
+				Street:     engine.StreetPreflop,
+			},
+			LegalActions: []engine.LegalAction{
+				{Type: engine.ActionFold},
+				{Type: engine.ActionCall, MinAmount: 10, MaxAmount: 10},
+				{Type: engine.ActionRaise, MinAmount: 28, MaxAmount: 509},
+				{Type: engine.ActionAllIn, MinAmount: 509, MaxAmount: 509},
+			},
+		},
+		Notice: &session.Notice{Type: "waiting_for_human", Message: "Your turn"},
+	})
+
+	opponentSeat := m.renderSeat(snapshot.Players[1])
+	if !strings.Contains(opponentSeat, "Bet: 17") {
+		t.Fatalf("expected opponent seat to show total street bet, got:\n%s", opponentSeat)
+	}
+	if strings.Contains(opponentSeat, "Bet: 10") {
+		t.Fatalf("opponent seat should not show call delta, got:\n%s", opponentSeat)
+	}
+
+	bar := m.renderActionBar()
+	if !strings.Contains(bar, "Call 10") {
+		t.Fatalf("expected action bar to show incremental call amount, got:\n%s", bar)
+	}
+}
+
+func defaultGameAction(prompt *session.Prompt) engine.Action {
+	action := engine.Action{PlayerID: prompt.PlayerID, Type: engine.ActionFold}
+	for _, legal := range prompt.LegalActions {
+		if legal.Type == engine.ActionCheck {
+			action.Type = engine.ActionCheck
+			return action
+		}
+	}
+	for _, legal := range prompt.LegalActions {
+		if legal.Type == engine.ActionCall {
+			action.Type = engine.ActionCall
+			action.Amount = legal.MinAmount
+			return action
+		}
+	}
+	if len(prompt.LegalActions) > 0 {
+		action.Type = prompt.LegalActions[0].Type
+		action.Amount = prompt.LegalActions[0].MinAmount
+		if action.Type == engine.ActionAllIn {
+			action.Amount = 0
+		}
+	}
+	return action
+}
