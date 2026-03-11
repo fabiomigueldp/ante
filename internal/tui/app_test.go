@@ -72,3 +72,19 @@ func TestAppSwitchToGameWithResumedSession(t *testing.T) {
 		t.Fatal("expected game init command")
 	}
 }
+
+func TestAppCopiesFallbackResultFromFinishedGameModel(t *testing.T) {
+	a := NewApp()
+	a.screen = ScreenGame
+	a.game = GameModel{}
+	cmd := a.updateGame(sessionDoneMsg{})
+	if cmd != nil {
+		t.Fatal("expected no command for sessionDone fallback")
+	}
+	if a.game.vm.Result != "Session ended." {
+		t.Fatalf("game vm result = %q, want %q", a.game.vm.Result, "Session ended.")
+	}
+	if a.lastResult != "Session ended." {
+		t.Fatalf("lastResult = %q, want %q", a.lastResult, "Session ended.")
+	}
+}

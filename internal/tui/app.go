@@ -324,6 +324,9 @@ func (a *App) updateGame(msg tea.Msg) tea.Cmd {
 				}
 			}
 		}
+		if a.lastResult == "" && next.vm.Finished && next.vm.Result != "" {
+			a.lastResult = next.vm.Result
+		}
 		return cmd
 	}
 	a.errorMsg = fmt.Sprintf("invalid game model type %T", m)
