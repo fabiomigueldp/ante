@@ -286,6 +286,15 @@ func TestGamePromptFlowResetsShowdownOnNextHand(t *testing.T) {
 			if nextCmd != nil {
 				t.Fatal("expected no waiter while a human prompt is active")
 			}
+			if env.Prompt.Kind == session.PromptKindBetweenHands {
+				model, submitCmd := m.submitControl(session.ControlIntent{Kind: session.ControlIntentReadyNextHand})
+				m = model.(GameModel)
+				if submitCmd == nil {
+					t.Fatal("expected submitControl to arm the next waiter")
+				}
+				cmd = submitCmd
+				continue
+			}
 			model, submitCmd := m.submitAction(defaultGameAction(env.Prompt))
 			m = model.(GameModel)
 			if submitCmd == nil {
@@ -475,6 +484,109 @@ func TestGameRenderSeatShowsStreetBetWhileActionBarShowsCallDelta(t *testing.T) 
 	bar := m.renderActionBar()
 	if !strings.Contains(bar, "Call 10") {
 		t.Fatalf("expected action bar to show incremental call amount, got:\n%s", bar)
+	}
+}
+
+func TestBetweenHandsActionBarShowsReadyAndLeave(t *testing.T) {
+	m := newGameTestModel(t)
+	m.vm = session.GameVM{
+		Prompt:       &session.Prompt{Kind: session.PromptKindBetweenHands, HandID: 3, PlayerID: m.sess.HumanID},
+		PromptKind:   session.PromptKindBetweenHands,
+		BetweenHands: true,
+		CanSave:      true,
+		StatusLine:   "Hand #3 complete. Press Enter for the next hand or L to leave the table.",
+	}
+	bar := m.renderActionBar()
+	if !strings.Contains(bar, "Next Hand") || !strings.Contains(bar, "Leave Table") {
+		t.Fatalf("expected between-hands controls, got:\n%s", bar)
+	}
+	if !strings.Contains(bar, "Pause/Save") {
+		t.Fatalf("expected between-hands prompt to advertise pause/save, got:\n%s", bar)
+	}
+}
+
+func TestBetweenHandsPreservesShowdownView(t *testing.T) {
+	m := newGameTestModel(t)
+	m.vm.Board = []engine.Card{engine.NewCard(engine.Ace, engine.Spades), engine.NewCard(engine.King, engine.Hearts), engine.NewCard(engine.Queen, engine.Clubs), engine.NewCard(engine.Jack, engine.Diamonds), engine.NewCard(engine.Ten, engine.Spades)}
+	m.vm.HumanCards = [2]engine.Card{engine.NewCard(engine.Nine, engine.Hearts), engine.NewCard(engine.Nine, engine.Diamonds)}
+	m.vm.Pot = 22
+	m.vm.Street = engine.StreetRiver
+	m.vm.Showdown = true
+	m.vm.Revealed = []session.RevealedHand{{PlayerID: 2, Name: "Bot", Cards: [2]engine.Card{engine.NewCard(engine.Ace, engine.Spades), engine.NewCard(engine.Ace, engine.Hearts)}, Eval: "One Pair"}}
+	m.vm.ShowdownPayouts = []session.ShowdownPayout{{PotIndex: 0, Winners: []engine.PlayerID{2}, Amount: 22}}
+	m.vm.PotAwards = []string{"Bot wins 22"}
+	m.vm.Prompt = &session.Prompt{Kind: session.PromptKindBetweenHands, HandID: 4, PlayerID: m.sess.HumanID}
+	m.vm.PromptKind = session.PromptKindBetweenHands
+	m.vm.BetweenHands = true
+	view := m.renderTable()
+	if !strings.Contains(view, "One Pair") || !strings.Contains(view, "+ 22") {
+		t.Fatalf("expected showdown information to remain visible between hands, got:\n%s", view)
+	}
+	if !strings.Contains(view, "╭") {
+		t.Fatalf("expected showdown summary to render inside a centered panel, got:\n%s", view)
+	}
+	if strings.Contains(view, "Hand Result") {
+		t.Fatalf("expected showdown panel to avoid redundant heading text, got:\n%s", view)
+	}
+}
+
+func TestRenderShowdownAggregatesMultiplePayoutsPerWinner(t *testing.T) {
+	m := newGameTestModel(t)
+	m.vm.Showdown = true
+	m.vm.Revealed = []session.RevealedHand{
+		{PlayerID: 2, Name: "Riley Banks", Cards: [2]engine.Card{engine.NewCard(engine.Five, engine.Spades), engine.NewCard(engine.Nine, engine.Clubs)}, Eval: "One Pair, 9s"},
+		{PlayerID: m.sess.HumanID, Name: "Player", Cards: [2]engine.Card{engine.NewCard(engine.Four, engine.Diamonds), engine.NewCard(engine.Four, engine.Hearts)}, Eval: "One Pair, 4s"},
+	}
+	m.vm.ShowdownPayouts = []session.ShowdownPayout{
+		{PotIndex: 0, Winners: []engine.PlayerID{2}, Amount: 12},
+		{PotIndex: 1, Winners: []engine.PlayerID{2}, Amount: 27},
+	}
+	m.vm.PotAwards = []string{"Riley Banks wins 12", "Riley Banks wins 27"}
+	panel := m.renderShowdown(120)
+	if !strings.Contains(panel, "+ 39") {
+		t.Fatalf("expected aggregated payout total in showdown panel, got:\n%s", panel)
+	}
+	if strings.Contains(panel, "wins 12") || strings.Contains(panel, "wins 27") {
+		t.Fatalf("expected structured table, not raw payout receipt lines, got:\n%s", panel)
+	}
+}
+
+func TestBetweenHandsEnvelopePreservesBoardPotAndHumanCards(t *testing.T) {
+	m := newGameTestModel(t)
+	env := session.Envelope{
+		Seq:       9,
+		SessionID: m.sess.SessionID,
+		HandID:    5,
+		Snapshot: session.TableState{
+			HandNum:    5,
+			HandID:     5,
+			Blinds:     engine.BlindLevel{SB: 2, BB: 4},
+			Board:      []engine.Card{engine.NewCard(engine.Ace, engine.Spades), engine.NewCard(engine.King, engine.Hearts), engine.NewCard(engine.Queen, engine.Clubs), engine.NewCard(engine.Jack, engine.Diamonds), engine.NewCard(engine.Ten, engine.Spades)},
+			Pot:        88,
+			Street:     engine.StreetRiver,
+			DealerSeat: 1,
+			HumanCards: [2]engine.Card{engine.NewCard(engine.Nine, engine.Hearts), engine.NewCard(engine.Nine, engine.Diamonds)},
+			Players: []session.PlayerInfo{
+				{ID: m.sess.HumanID, Name: "Hero", Stack: 140, IsHuman: true, Seat: 0},
+				{ID: 2, Name: "Bot", Stack: 0, Seat: 1, Status: engine.StatusOut},
+			},
+		},
+		Prompt: &session.Prompt{Kind: session.PromptKindBetweenHands, HandID: 5, PlayerID: m.sess.HumanID},
+		Notice: &session.Notice{Type: "waiting_for_ready", Message: "Hand #5 complete. Press Enter for the next hand or L to leave the table."},
+	}
+	m = applyEnvelopeToGame(t, m, env)
+	table := m.renderTable()
+	if strings.Contains(table, "0♠") {
+		t.Fatalf("expected no zero-value card render in between-hands table, got:\n%s", table)
+	}
+	if !strings.Contains(table, "88") {
+		t.Fatalf("expected preserved pot in between-hands table, got:\n%s", table)
+	}
+	if !strings.Contains(table, "River") {
+		t.Fatalf("expected preserved street in between-hands table, got:\n%s", table)
+	}
+	if strings.Count(table, "┌──┐") < 7 || !strings.Contains(table, "│A ") || !strings.Contains(table, "│9 ") {
+		t.Fatalf("expected preserved board and human cards in between-hands table, got:\n%s", table)
 	}
 }
 

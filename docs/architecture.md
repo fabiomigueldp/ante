@@ -131,7 +131,8 @@ Initial sandbox lifecycle:
    - the transcript chunk
    - a checkpoint hash for that chunk
    - an immutable snapshot linked to the same session and hand boundary
-5. Save/load v1 may only target these hand-boundary snapshots.
+5. The session authority enters an explicit between-hands synchronization barrier and waits for readiness before the next hand begins.
+6. Save/load v1 may only target these hand-boundary snapshots and resumes into the waiting-ready boundary rather than auto-starting the next hand.
 
 Transcript chunking and checkpoint hashing rules:
 
@@ -139,6 +140,8 @@ Transcript chunking and checkpoint hashing rules:
 - Each chunk is linked to the previous chunk hash.
 - Each checkpoint is computed over canonical bytes, never raw JSON.
 - Checkpoints are created only at deterministic sequencing boundaries.
+- The barrier between hands is an authoritative sync boundary owned by `Session Authority`, not by the renderer.
+- Session-control intents such as next-hand readiness or leaving the table are session-layer lifecycle inputs, not engine poker actions.
 - Replay, history, and results must read transcript-backed artifacts, not best-effort reconstructions from summaries.
 
 ## Stable Linkage Between Session, Snapshot, and Transcript Identifiers
@@ -212,6 +215,7 @@ Current sandbox trust roots:
 Crash recovery boundaries:
 
 - the runtime may recover only from committed hand-boundary artifacts in the first save/load slice
+- a resumed hand-boundary save returns to the between-hands waiting-ready state and never auto-starts the next deal
 - mid-hand state is explicitly unsupported in v1 and must fail loudly
 - transcript chunks and snapshots must be committed in an order that avoids a save pointing at a nonexistent checkpoint
 

@@ -44,6 +44,9 @@ func RankStr(r engine.Rank) string {
 
 // CardStr renders a single card as a compact inline string like [A♠].
 func CardStr(c engine.Card) string {
+	if !isRenderableCard(c) {
+		return "  "
+	}
 	sym := suitSymbol[c.Suit]
 	rank := RankStr(c.Rank)
 	style := lipgloss.NewStyle().Foreground(suitColor[c.Suit])
@@ -60,11 +63,22 @@ func RenderHoleCards(cards [2]engine.Card, visible bool) string {
 	if !visible {
 		return fmt.Sprintf("[%s][%s]", CardBack(), CardBack())
 	}
-	return fmt.Sprintf("[%s][%s]", CardStr(cards[0]), CardStr(cards[1]))
+	left := CardStr(cards[0])
+	right := CardStr(cards[1])
+	if !isRenderableCard(cards[0]) {
+		left = CardBack()
+	}
+	if !isRenderableCard(cards[1]) {
+		right = CardBack()
+	}
+	return fmt.Sprintf("[%s][%s]", left, right)
 }
 
 // RenderBigCard renders a card in a larger 3-line format for the human player.
 func RenderBigCard(c engine.Card) string {
+	if !isRenderableCard(c) {
+		return renderEmptyBigCard()
+	}
 	rank := RankStr(c.Rank)
 	sym := suitSymbol[c.Suit]
 	style := lipgloss.NewStyle().Foreground(suitColor[c.Suit])
@@ -78,6 +92,10 @@ func RenderBigCard(c engine.Card) string {
 	sym_line := "\u2502" + style.Render(sym+" ") + "\u2502"
 	bot := "\u2514\u2500\u2500\u2518" // └──┘
 	return top + "\n" + mid + "\n" + sym_line + "\n" + bot
+}
+
+func isRenderableCard(c engine.Card) bool {
+	return c.Rank >= engine.Two && c.Rank <= engine.Ace && c.Suit <= engine.Clubs
 }
 
 // RenderBigCards renders hole cards side by side in large format.

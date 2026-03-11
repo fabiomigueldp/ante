@@ -18,6 +18,14 @@ func ReduceGameVM(current GameVM, env Envelope) GameVM {
 	next.HandID = env.HandID
 	next.applySnapshot(env.Snapshot)
 	next.Prompt = clonePrompt(env.Prompt)
+	next.PromptKind = PromptKindAction
+	next.BetweenHands = false
+	next.CanSave = false
+	if env.Prompt != nil {
+		next.PromptKind = env.Prompt.Kind
+		next.BetweenHands = env.Prompt.Kind == PromptKindBetweenHands
+		next.CanSave = env.Prompt.Kind == PromptKindBetweenHands
+	}
 	next.LastError = ""
 	if env.Prompt == nil {
 		next.BotReasoning = ""
@@ -55,6 +63,12 @@ func (vm *GameVM) applySnapshot(snapshot TableState) {
 			break
 		}
 	}
+	if snapshot.Boundary {
+		vm.Showdown = snapshot.Showdown
+		vm.Revealed = cloneRevealedHands(snapshot.Revealed)
+		vm.ShowdownPayouts = cloneShowdownPayouts(snapshot.ShowdownPayouts)
+		vm.PotAwards = append([]string(nil), snapshot.PotAwards...)
+	}
 }
 
 func (vm *GameVM) applyNotice(notice Notice) {
@@ -66,7 +80,10 @@ func (vm *GameVM) applyNotice(notice Notice) {
 	case "hand_started":
 		vm.Showdown = false
 		vm.Revealed = nil
+		vm.ShowdownPayouts = nil
 		vm.PotAwards = nil
+		vm.BetweenHands = false
+		vm.PromptKind = PromptKindAction
 		vm.StatusLine = ""
 		vm.Message = ""
 		vm.MessageKind = MessageKindNone
@@ -94,6 +111,12 @@ func (vm *GameVM) applyNotice(notice Notice) {
 		}
 	case "pot_awarded":
 		if awarded, ok := notice.Event.(engine.PotAwardedEvent); ok {
+			vm.ShowdownPayouts = append(vm.ShowdownPayouts, ShowdownPayout{
+				PotIndex: awarded.PotIndex,
+				Winners:  append([]engine.PlayerID(nil), awarded.Winners...),
+				Amount:   awarded.Amount,
+				OddChip:  awarded.OddChip,
+			})
 			vm.PotAwards = append(vm.PotAwards, notice.Message)
 			if len(awarded.Winners) > 0 {
 				vm.StatusLine = notice.Message
@@ -108,6 +131,10 @@ func (vm *GameVM) applyNotice(notice Notice) {
 		vm.StatusLine = notice.Message
 		vm.BotReasoning = notice.Reason
 	case "waiting_for_human":
+		vm.StatusLine = notice.Message
+	case "waiting_for_ready":
+		vm.BetweenHands = true
+		vm.PromptKind = PromptKindBetweenHands
 		vm.StatusLine = notice.Message
 	case "tournament_finished", "session_ended":
 		vm.Finished = true
@@ -153,12 +180,30 @@ func cloneTableState(snapshot TableState) TableState {
 	copyState := snapshot
 	copyState.Players = clonePlayers(snapshot.Players)
 	copyState.Board = append([]engine.Card(nil), snapshot.Board...)
+	copyState.Revealed = cloneRevealedHands(snapshot.Revealed)
+	copyState.ShowdownPayouts = cloneShowdownPayouts(snapshot.ShowdownPayouts)
+	copyState.PotAwards = append([]string(nil), snapshot.PotAwards...)
 	return copyState
 }
 
 func clonePlayers(players []PlayerInfo) []PlayerInfo {
 	cloned := make([]PlayerInfo, len(players))
 	copy(cloned, players)
+	return cloned
+}
+
+func cloneRevealedHands(hands []RevealedHand) []RevealedHand {
+	cloned := make([]RevealedHand, len(hands))
+	copy(cloned, hands)
+	return cloned
+}
+
+func cloneShowdownPayouts(payouts []ShowdownPayout) []ShowdownPayout {
+	cloned := make([]ShowdownPayout, len(payouts))
+	for i, payout := range payouts {
+		cloned[i] = payout
+		cloned[i].Winners = append([]engine.PlayerID(nil), payout.Winners...)
+	}
 	return cloned
 }
 

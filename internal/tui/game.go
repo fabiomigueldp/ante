@@ -50,6 +50,15 @@ type handSoundState struct {
 	bustCuePlayed bool
 }
 
+type showdownRowView struct {
+	PlayerID engine.PlayerID
+	Name     string
+	Cards    [2]engine.Card
+	Eval     string
+	Gain     int
+	IsDealer bool
+}
+
 func NewGameModel(sess *session.Session, showPotOdds bool) GameModel {
 	return GameModel{
 		sess:        sess,
@@ -272,6 +281,17 @@ func (m GameModel) handleGameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.vm.PromptKind == session.PromptKindBetweenHands {
+		switch msg.String() {
+		case "enter", "r":
+			return m.submitControl(session.ControlIntent{Kind: session.ControlIntentReadyNextHand})
+		case "l":
+			return m.submitControl(session.ControlIntent{Kind: session.ControlIntentLeaveTable})
+		default:
+			return m, nil
+		}
+	}
+
 	if m.betMode {
 		return m.handleBetInput(msg)
 	}
@@ -373,6 +393,22 @@ func (m GameModel) submitAction(action engine.Action) (tea.Model, tea.Cmd) {
 	}
 }
 
+func (m GameModel) submitControl(control session.ControlIntent) (tea.Model, tea.Cmd) {
+	if m.vm.Prompt == nil {
+		return m, nil
+	}
+	m.awaitingAction = true
+	prompt := m.vm.Prompt
+	return m, func() tea.Msg {
+		m.sess.ActionResp <- session.PlayerActionIntent{
+			PromptSeq: prompt.Seq,
+			HandID:    prompt.HandID,
+			Control:   control,
+		}
+		return m.waitForEnvelope()()
+	}
+}
+
 func (m GameModel) hasLegal(actionType engine.ActionType) bool {
 	if m.vm.Prompt == nil {
 		return false
@@ -465,7 +501,7 @@ func (m GameModel) renderTable() string {
 	human, opponents := m.splitPlayers()
 	parts := []string{m.renderOpponentArea(opponents, m.width)}
 	if m.vm.Showdown && len(m.vm.Revealed) > 0 {
-		parts = append(parts, m.renderShowdown())
+		parts = append(parts, m.renderShowdown(m.width))
 	}
 	parts = append(parts, m.renderBoardArea(m.width), m.renderHumanArea(human, m.width))
 	if m.messageText() != "" {
@@ -634,15 +670,189 @@ func (m GameModel) renderHumanArea(human *session.PlayerInfo, width int) string 
 	return CenterH(width).Render(content)
 }
 
-func (m GameModel) renderShowdown() string {
-	lines := make([]string, 0, len(m.vm.Revealed)+len(m.vm.PotAwards))
+func (m GameModel) renderShowdown(width int) string {
+	rows := m.showdownRows()
+	lines := make([]string, 0, len(rows))
+	panelWidth := width - 18
+	if panelWidth > 78 {
+		panelWidth = 78
+	}
+	if panelWidth < 38 {
+		panelWidth = 38
+	}
+	if len(rows) > 0 {
+		lines = m.renderShowdownTableLines(rows, panelWidth)
+	} else {
+		lines = m.renderShowdownFallbackLines(panelWidth)
+	}
+	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
+	panel := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorDarkGray).
+		Padding(0, 1).
+		Foreground(ColorWhite).
+		Render(content)
+	return CenterH(width).Render(panel)
+}
+
+func (m GameModel) showdownRows() []showdownRowView {
+	if len(m.vm.Revealed) == 0 {
+		return nil
+	}
+	if len(m.vm.ShowdownPayouts) == 0 && len(m.vm.PotAwards) > 0 {
+		return nil
+	}
+	gains := aggregateShowdownGains(m.vm.ShowdownPayouts)
+	rows := make([]showdownRowView, 0, len(m.vm.Revealed))
 	for _, revealed := range m.vm.Revealed {
-		lines = append(lines, fmt.Sprintf("  %s: %s  %s", revealed.Name, RenderHoleCards(revealed.Cards, true), StyleHandRank.Render(revealed.Eval)))
+		rows = append(rows, showdownRowView{
+			PlayerID: revealed.PlayerID,
+			Name:     revealed.Name,
+			Cards:    revealed.Cards,
+			Eval:     revealed.Eval,
+			Gain:     gains[revealed.PlayerID],
+			IsDealer: m.isDealerPlayer(revealed.PlayerID),
+		})
 	}
+	return rows
+}
+
+func aggregateShowdownGains(payouts []session.ShowdownPayout) map[engine.PlayerID]int {
+	gains := make(map[engine.PlayerID]int)
+	for _, payout := range payouts {
+		if len(payout.Winners) == 0 || payout.Amount <= 0 {
+			continue
+		}
+		share := payout.Amount / len(payout.Winners)
+		remainder := payout.Amount - share*len(payout.Winners)
+		for _, winner := range payout.Winners {
+			gains[winner] += share
+		}
+		if remainder > 0 && payout.OddChip != 0 {
+			gains[payout.OddChip] += remainder
+		}
+	}
+	return gains
+}
+
+func (m GameModel) renderShowdownTableLines(rows []showdownRowView, panelWidth int) []string {
+	nameWidth, cardsWidth, descWidth, gainWidth := m.showdownColumnWidths(rows, panelWidth)
+	lines := make([]string, 0, len(rows))
+	for _, row := range rows {
+		name := lipgloss.NewStyle().Width(nameWidth).Render(truncateText(showdownDisplayName(row.Name, row.IsDealer), nameWidth))
+		cards := lipgloss.NewStyle().Width(cardsWidth).Render(showdownCards(row.Cards))
+		desc := lipgloss.NewStyle().Width(descWidth).Render(truncateText(row.Eval, descWidth))
+		gainText := ""
+		if row.Gain > 0 {
+			gainText = "+ " + ChipStr(row.Gain)
+		}
+		gain := lipgloss.NewStyle().Width(gainWidth).Align(lipgloss.Right).Render(StyleWinner.Render(gainText))
+		line := name + "  " + cards + "  " + desc
+		if gainWidth > 0 {
+			line += "  " + gain
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+func (m GameModel) renderShowdownFallbackLines(panelWidth int) []string {
+	innerWidth := panelWidth - 4
+	if innerWidth < 20 {
+		innerWidth = 20
+	}
+	if len(m.vm.PotAwards) == 0 {
+		return []string{lipgloss.NewStyle().Width(innerWidth).Render(StyleDim.Render("No showdown data."))}
+	}
+	lines := make([]string, 0, len(m.vm.PotAwards))
 	for _, award := range m.vm.PotAwards {
-		lines = append(lines, "  "+StyleWinner.Render(award))
+		lines = append(lines, lipgloss.NewStyle().Width(innerWidth).Render(truncateText(award, innerWidth)))
 	}
-	return strings.Join(lines, "\n")
+	return lines
+}
+
+func (m GameModel) showdownColumnWidths(rows []showdownRowView, panelWidth int) (int, int, int, int) {
+	innerWidth := panelWidth - 4
+	if innerWidth < 32 {
+		innerWidth = 32
+	}
+	nameWidth := 12
+	cardsWidth := 11
+	gainWidth := 0
+	for _, row := range rows {
+		nameWidth = max(nameWidth, lipgloss.Width(showdownDisplayName(row.Name, row.IsDealer)))
+		cardsWidth = max(cardsWidth, lipgloss.Width(showdownCards(row.Cards)))
+		if row.Gain > 0 {
+			gainWidth = max(gainWidth, lipgloss.Width("+ "+ChipStr(row.Gain)))
+		}
+	}
+	if nameWidth > 18 {
+		nameWidth = 18
+	}
+	gaps := 4
+	if gainWidth > 0 {
+		gaps = 6
+	}
+	descWidth := innerWidth - nameWidth - cardsWidth - gainWidth - gaps
+	if descWidth < 14 {
+		reducible := nameWidth - 10
+		if reducible > 0 {
+			shrink := min(reducible, 14-descWidth)
+			nameWidth -= shrink
+			descWidth += shrink
+		}
+	}
+	if descWidth < 14 {
+		descWidth = 14
+	}
+	return nameWidth, cardsWidth, descWidth, gainWidth
+}
+
+func showdownDisplayName(name string, isDealer bool) string {
+	if isDealer {
+		return name + " D"
+	}
+	return name
+}
+
+func showdownCards(cards [2]engine.Card) string {
+	if !isRenderableCard(cards[0]) || !isRenderableCard(cards[1]) {
+		return ""
+	}
+	return RenderHoleCards(cards, true)
+}
+
+func truncateText(text string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(text) <= width {
+		return text
+	}
+	runes := []rune(text)
+	if width <= 3 {
+		if len(runes) > width {
+			return string(runes[:width])
+		}
+		return string(runes)
+	}
+	for len(runes) > 0 {
+		candidate := string(runes) + "..."
+		if lipgloss.Width(candidate) <= width {
+			return candidate
+		}
+		runes = runes[:len(runes)-1]
+	}
+	return "..."
+}
+
+func (m GameModel) isDealerPlayer(playerID engine.PlayerID) bool {
+	for _, player := range m.vm.Players {
+		if player.ID == playerID {
+			return player.Seat == m.vm.DealerSeat
+		}
+	}
+	return false
 }
 
 func (m GameModel) renderActionBar() string {
@@ -652,6 +862,24 @@ func (m GameModel) renderActionBar() string {
 			info = "Waiting..."
 		}
 		return StyleFooter.Width(m.width).Render(StyleDim.Render(info))
+	}
+
+	if m.vm.PromptKind == session.PromptKindBetweenHands {
+		actions := []string{
+			StyleKey.Render("[Enter]") + " Next Hand",
+			StyleKey.Render("[L]") + " Leave Table",
+		}
+		line := strings.Join(actions, "   ")
+		if m.vm.CanSave {
+			line += "   " + StyleDim.Render("| Esc -> Pause/Save")
+		}
+		if m.vm.StatusLine != "" {
+			line += "   " + StyleDim.Render("| "+m.vm.StatusLine)
+		}
+		if m.messageText() != "" {
+			return StyleFooter.Width(m.width).Render(m.renderMessage() + "\n" + line)
+		}
+		return StyleFooter.Width(m.width).Render(line)
 	}
 
 	extraLine := ""

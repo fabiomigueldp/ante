@@ -10,18 +10,19 @@ import (
 
 // SaveSlot holds a serializable game state.
 type SaveSlot struct {
-	SchemaVersion int       `json:"schema_version"`
-	SessionID     string    `json:"session_id,omitempty"`
-	LastSeq       uint64    `json:"last_seq,omitempty"`
-	Name          string    `json:"name"`
-	Timestamp     time.Time `json:"timestamp"`
-	Mode          string    `json:"mode"`
-	HandNumber    int       `json:"hand_number"`
-	PlayerName    string    `json:"player_name"`
-	PlayerStack   int       `json:"player_stack"`
-	TotalPlayers  int       `json:"total_players"`
-	ActivePlayers int       `json:"active_players"`
-	BlindLevel    int       `json:"blind_level"`
+	SchemaVersion  int       `json:"schema_version"`
+	SessionID      string    `json:"session_id,omitempty"`
+	LastSeq        uint64    `json:"last_seq,omitempty"`
+	LifecyclePhase string    `json:"lifecycle_phase,omitempty"`
+	Name           string    `json:"name"`
+	Timestamp      time.Time `json:"timestamp"`
+	Mode           string    `json:"mode"`
+	HandNumber     int       `json:"hand_number"`
+	PlayerName     string    `json:"player_name"`
+	PlayerStack    int       `json:"player_stack"`
+	TotalPlayers   int       `json:"total_players"`
+	ActivePlayers  int       `json:"active_players"`
+	BlindLevel     int       `json:"blind_level"`
 
 	TableData  TableSaveData                    `json:"table_data"`
 	Players    []PlayerSaveData                 `json:"players"`
@@ -29,6 +30,7 @@ type SaveSlot struct {
 	BotStates  map[engine.PlayerID]BotStateSave `json:"bot_states,omitempty"`
 	Config     GameConfig                       `json:"config"`
 	Metrics    SessionMetricsSnapshot           `json:"metrics,omitempty"`
+	Boundary   BoundaryStateSave                `json:"boundary,omitempty"`
 	History    []HandRecordSave                 `json:"history"`
 	Tournament TournamentSaveData               `json:"tournament,omitempty"`
 	CashGame   CashGameSaveData                 `json:"cash_game,omitempty"`
@@ -96,6 +98,45 @@ type TournamentEliminationSave struct {
 
 type CashGameSaveData struct {
 	Profit map[engine.PlayerID]int `json:"profit,omitempty"`
+}
+
+type BoundaryStateSave struct {
+	Active          bool                   `json:"active"`
+	HandID          int                    `json:"hand_id,omitempty"`
+	Snapshot        TableSaveBoundaryState `json:"snapshot,omitempty"`
+	HumanPending    bool                   `json:"human_pending,omitempty"`
+	HumanCanLeave   bool                   `json:"human_can_leave,omitempty"`
+	LastResultLabel string                 `json:"last_result_label,omitempty"`
+}
+
+type TableSaveBoundaryState struct {
+	HandNum    int                    `json:"hand_num,omitempty"`
+	HandID     int                    `json:"hand_id,omitempty"`
+	Blinds     engine.BlindLevel      `json:"blinds"`
+	Board      []engine.Card          `json:"board,omitempty"`
+	Pot        int                    `json:"pot,omitempty"`
+	Street     engine.Street          `json:"street,omitempty"`
+	DealerSeat int                    `json:"dealer_seat,omitempty"`
+	HumanCards [2]engine.Card         `json:"human_cards"`
+	Players    []PlayerSaveData       `json:"players,omitempty"`
+	Showdown   bool                   `json:"showdown,omitempty"`
+	Revealed   []BoundaryRevealedSave `json:"revealed,omitempty"`
+	Payouts    []BoundaryPayoutSave   `json:"payouts,omitempty"`
+	PotAwards  []string               `json:"pot_awards,omitempty"`
+}
+
+type BoundaryRevealedSave struct {
+	PlayerID engine.PlayerID `json:"player_id"`
+	Name     string          `json:"name"`
+	Cards    [2]engine.Card  `json:"cards"`
+	Eval     string          `json:"eval"`
+}
+
+type BoundaryPayoutSave struct {
+	PotIndex int               `json:"pot_index"`
+	Winners  []engine.PlayerID `json:"winners,omitempty"`
+	Amount   int               `json:"amount"`
+	OddChip  engine.PlayerID   `json:"odd_chip,omitempty"`
 }
 
 func savesDir() (string, error) {

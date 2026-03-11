@@ -129,6 +129,19 @@ func ResumeFromSave(save *storage.SaveSlot) (*Session, error) {
 	if sess.SessionID == "" {
 		sess.SessionID = mustNewSessionID()
 	}
+	if save.Boundary.Active {
+		sess.Phase = PhaseWaitingReady
+		sess.readyState = &ReadyState{
+			HandID:   save.Boundary.HandID,
+			Snapshot: restoreBoundarySnapshot(save.Boundary.Snapshot),
+			Ready: map[engine.PlayerID]bool{
+				sess.HumanID: !save.Boundary.HumanPending,
+			},
+			HumanPending:      save.Boundary.HumanPending,
+			HumanCanLeave:     save.Boundary.HumanCanLeave,
+			LastResultMessage: save.Boundary.LastResultLabel,
+		}
+	}
 	return sess, nil
 }
 
@@ -163,13 +176,62 @@ func phaseFromSave(save *storage.SaveSlot) Phase {
 	if save == nil {
 		return PhaseSetup
 	}
-	if save.Mode == "tournament" || save.Mode == "headsup" {
-		if len(save.Tournament.Eliminations) > 0 || save.HandNumber > 0 {
-			return PhaseHandComplete
-		}
+	switch save.LifecyclePhase {
+	case "playing_hand":
+		return PhasePlayingHand
+	case "waiting_ready":
+		return PhaseWaitingReady
+	case "session_over":
+		return PhaseSessionOver
+	}
+	if save.Boundary.Active {
+		return PhaseWaitingReady
 	}
 	if save.HandNumber > 0 {
-		return PhaseHandComplete
+		return PhasePlayingHand
 	}
 	return PhaseSetup
+}
+
+func restoreBoundarySnapshot(saved storage.TableSaveBoundaryState) TableState {
+	state := TableState{
+		HandNum:    saved.HandNum,
+		HandID:     saved.HandID,
+		Blinds:     saved.Blinds,
+		Board:      append([]engine.Card(nil), saved.Board...),
+		Pot:        saved.Pot,
+		Street:     saved.Street,
+		DealerSeat: saved.DealerSeat,
+		HumanCards: saved.HumanCards,
+		Boundary:   true,
+		Showdown:   saved.Showdown,
+		PotAwards:  append([]string(nil), saved.PotAwards...),
+	}
+	for _, revealed := range saved.Revealed {
+		state.Revealed = append(state.Revealed, RevealedHand{
+			PlayerID: revealed.PlayerID,
+			Name:     revealed.Name,
+			Cards:    revealed.Cards,
+			Eval:     revealed.Eval,
+		})
+	}
+	for _, payout := range saved.Payouts {
+		state.ShowdownPayouts = append(state.ShowdownPayouts, ShowdownPayout{
+			PotIndex: payout.PotIndex,
+			Winners:  append([]engine.PlayerID(nil), payout.Winners...),
+			Amount:   payout.Amount,
+			OddChip:  payout.OddChip,
+		})
+	}
+	for _, player := range saved.Players {
+		state.Players = append(state.Players, PlayerInfo{
+			ID:      player.ID,
+			Name:    player.Name,
+			Stack:   player.Stack,
+			Status:  player.Status,
+			Seat:    player.SeatIndex,
+			IsHuman: player.IsHuman,
+		})
+	}
+	return state
 }

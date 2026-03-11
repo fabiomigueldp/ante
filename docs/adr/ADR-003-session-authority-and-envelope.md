@@ -26,6 +26,8 @@ Binding rules:
 - stale prompts are rejected by sequence, not guessed around in the renderer
 - the TUI consumes this stream and reduces it into `GameVM`
 - the TUI does not independently decide when legal actions are valid
+- the same ordered envelope also carries session-control prompts that are not engine poker actions, including the between-hands readiness barrier
+- after every completed hand, `Session Authority` may pause in a between-hands synchronization state and require explicit readiness before the next hand begins
 
 In the sandbox, `Session Authority` is a single local process. This is acceptable only because sandbox chips are ephemeral. This ADR does not authorize a future host-authoritative trust model for persistent-value tables.
 
@@ -36,6 +38,7 @@ Positive:
 - prompt, log, and legal actions can change atomically
 - reducer tests can prove ordering behavior clearly
 - later network protocol work has a clearer authority contract to preserve
+- hand-boundary save/load and future P2P settlement both have a formal sync barrier instead of relying on auto-advance timing
 
 Costs:
 

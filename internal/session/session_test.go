@@ -153,6 +153,132 @@ func TestSessionRun_SmallTournament(t *testing.T) {
 	}
 }
 
+func TestSessionStopsAtBetweenHandsUntilHumanReady(t *testing.T) {
+	store, _, _ := newSessionTestStore(t)
+	useSessionDependenciesForTest(t, Dependencies{ArtifactStore: store, TimeAnchorProvider: store.TimeAnchorProvider()})
+	sess, err := New(Config{
+		Mode:          engine.ModeTournament,
+		Difficulty:    ai.DifficultyEasy,
+		Seats:         3,
+		StartingStack: 50,
+		PlayerName:    "Hero",
+		Seed:          77,
+	})
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sess.Run()
+	}()
+	seenWaitingReady := false
+	seenNextHand := false
+	for env := range sess.Updates {
+		if env.Prompt != nil && env.Prompt.Kind == PromptKindAction {
+			select {
+			case sess.ActionResp <- PlayerActionIntent{PromptSeq: env.Prompt.Seq, HandID: env.Prompt.HandID, Action: defaultActionForPrompt(env.Prompt)}:
+			case <-sess.stop:
+			}
+			continue
+		}
+		if env.Prompt != nil && env.Prompt.Kind == PromptKindBetweenHands {
+			seenWaitingReady = true
+			if sess.Phase != PhaseWaitingReady {
+				t.Fatalf("phase = %d, want PhaseWaitingReady", sess.Phase)
+			}
+			if !sess.CanSave() {
+				t.Fatal("expected CanSave to be true while waiting for ready")
+			}
+			if sess.readyState == nil {
+				t.Fatal("expected readyState to be populated")
+			}
+			if env.Snapshot.HandID != sess.readyState.Snapshot.HandID {
+				t.Fatalf("boundary snapshot hand id = %d, want %d", env.Snapshot.HandID, sess.readyState.Snapshot.HandID)
+			}
+			if env.Snapshot.Pot != sess.readyState.Snapshot.Pot {
+				t.Fatalf("boundary snapshot pot = %d, want %d", env.Snapshot.Pot, sess.readyState.Snapshot.Pot)
+			}
+			if env.Snapshot.Street != sess.readyState.Snapshot.Street {
+				t.Fatalf("boundary snapshot street = %d, want %d", env.Snapshot.Street, sess.readyState.Snapshot.Street)
+			}
+			if !equalCards(env.Snapshot.Board, sess.readyState.Snapshot.Board) {
+				t.Fatalf("boundary snapshot board = %+v, want %+v", env.Snapshot.Board, sess.readyState.Snapshot.Board)
+			}
+			if env.Snapshot.HumanCards != sess.readyState.Snapshot.HumanCards {
+				t.Fatalf("boundary human cards = %+v, want %+v", env.Snapshot.HumanCards, sess.readyState.Snapshot.HumanCards)
+			}
+			sess.Stop()
+			continue
+		}
+		if env.Notice != nil && env.Notice.Type == "hand_started" && env.HandID > 1 {
+			seenNextHand = true
+			sess.Stop()
+		}
+	}
+	<-done
+	if !seenWaitingReady {
+		t.Fatal("expected session to stop at between-hands boundary")
+	}
+	if seenNextHand {
+		t.Fatal("next hand should not start before the explicit ready signal is processed")
+	}
+}
+
+func TestSessionLeaveTableEndsCleanlyFromBetweenHands(t *testing.T) {
+	store, _, _ := newSessionTestStore(t)
+	useSessionDependenciesForTest(t, Dependencies{ArtifactStore: store, TimeAnchorProvider: store.TimeAnchorProvider()})
+	sess, err := New(Config{
+		Mode:          engine.ModeCashGame,
+		Difficulty:    ai.DifficultyEasy,
+		Seats:         3,
+		StartingStack: 100,
+		PlayerName:    "Hero",
+		Seed:          88,
+		CashGameBuyIn: 200,
+	})
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sess.Run()
+	}()
+	seenBoundary := false
+	seenSessionEnd := false
+	for env := range sess.Updates {
+		if env.Prompt != nil && env.Prompt.Kind == PromptKindAction {
+			select {
+			case sess.ActionResp <- PlayerActionIntent{PromptSeq: env.Prompt.Seq, HandID: env.Prompt.HandID, Action: defaultActionForPrompt(env.Prompt)}:
+			case <-sess.stop:
+			}
+			continue
+		}
+		if env.Prompt != nil && env.Prompt.Kind == PromptKindBetweenHands {
+			seenBoundary = true
+			select {
+			case sess.ActionResp <- PlayerActionIntent{PromptSeq: env.Prompt.Seq, HandID: env.Prompt.HandID, Control: ControlIntent{Kind: ControlIntentLeaveTable}}:
+			case <-sess.stop:
+			}
+			continue
+		}
+		if env.Notice != nil && env.Notice.Type == "session_ended" {
+			seenSessionEnd = true
+		}
+	}
+	<-done
+	if !seenBoundary {
+		t.Fatal("expected between-hands prompt before leaving the table")
+	}
+	if !seenSessionEnd {
+		t.Fatal("expected clean session_ended notice after leave-table intent")
+	}
+	if sess.Summary == nil {
+		t.Fatal("expected session summary to be persisted on leave-table flow")
+	}
+}
+
 func TestSessionRun_DeterministicSeeds(t *testing.T) {
 	cfg := Config{
 		Mode:          engine.ModeHeadsUpDuel,
@@ -368,8 +494,18 @@ func runSessionWithAutoPlay(t *testing.T, sess *Session, chooser func(*Prompt) e
 			observe(env)
 		}
 		if env.Prompt != nil {
+			if env.Prompt.Kind == PromptKindBetweenHands {
+				select {
+				case sess.ActionResp <- PlayerActionIntent{PromptSeq: env.Prompt.Seq, HandID: env.Prompt.HandID, Control: ControlIntent{Kind: ControlIntentReadyNextHand}}:
+				case <-sess.stop:
+				}
+				continue
+			}
 			action := chooser(env.Prompt)
-			sess.ActionResp <- PlayerActionIntent{PromptSeq: env.Prompt.Seq, HandID: env.Prompt.HandID, Action: action}
+			select {
+			case sess.ActionResp <- PlayerActionIntent{PromptSeq: env.Prompt.Seq, HandID: env.Prompt.HandID, Action: action}:
+			case <-sess.stop:
+			}
 		}
 	}
 	<-done
@@ -404,4 +540,16 @@ func playerInfoByID(players []PlayerInfo, id engine.PlayerID) *PlayerInfo {
 		}
 	}
 	return nil
+}
+
+func equalCards(a, b []engine.Card) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

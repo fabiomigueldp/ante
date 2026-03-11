@@ -33,10 +33,20 @@ type Phase uint8
 
 const (
 	PhaseSetup Phase = iota
-	PhasePlaying
-	PhaseHandComplete
+	PhasePlayingHand
+	PhaseWaitingReady
 	PhaseSessionOver
 )
+
+type ReadyState struct {
+	HandID            int
+	Snapshot          TableState
+	Ready             map[engine.PlayerID]bool
+	HumanPending      bool
+	HumanCanLeave     bool
+	LastSummary       HandSummary
+	LastResultMessage string
+}
 
 // HandSummary is emitted after each hand completes.
 type HandSummary struct {
@@ -78,6 +88,7 @@ type Session struct {
 	transcript  *TranscriptWriter
 	metrics     *MetricsAccumulator
 	Summary     *storage.SessionSummary
+	readyState  *ReadyState
 }
 
 // New creates a session from config. Does not start the game loop.
@@ -223,13 +234,21 @@ func (s *Session) Run() {
 		close(s.Updates)
 	}()
 
-	s.Phase = PhasePlaying
+	s.Phase = PhasePlayingHand
 	if !s.resumed {
 		if _, ok := s.emitEnvelope(Envelope{Notice: &Notice{Type: "session_started", Message: fmt.Sprintf("Welcome to the table, %s!", s.Config.PlayerName)}}); !ok {
 			return
 		}
 	} else {
 		s.resumed = false
+		if s.Phase == PhaseWaitingReady && s.readyState != nil {
+			if !s.emitResumedBoundaryPrompt() {
+				return
+			}
+			if !s.waitForHumanReadyDecision() {
+				return
+			}
+		}
 	}
 	if s.isStopped() {
 		return
@@ -282,6 +301,13 @@ func (s *Session) Run() {
 		// Check session end conditions
 		if summary.IsFinished {
 			break
+		}
+
+		if !s.beginBetweenHands(summary) {
+			return
+		}
+		if !s.waitForHumanReadyDecision() {
+			return
 		}
 
 		// Cool down all bots between hands
@@ -346,6 +372,7 @@ func (s *Session) handleHumanAction(hand *engine.Hand, playerID engine.PlayerID)
 		promptSeq, ok := s.emitEnvelope(Envelope{
 			HandID: hand.ID,
 			Prompt: &Prompt{
+				Kind:         PromptKindAction,
 				PlayerID:     playerID,
 				View:         view,
 				LegalActions: legal,
@@ -493,6 +520,164 @@ func (s *Session) buildHandSummary(hand *engine.Hand) HandSummary {
 	return summary
 }
 
+func (s *Session) beginBetweenHands(summary HandSummary) bool {
+	boundarySnapshot := s.buildBoundarySnapshot()
+	s.Phase = PhaseWaitingReady
+	s.currentHand = nil
+	ready := make(map[engine.PlayerID]bool, len(s.Table.Players))
+	for _, player := range s.Table.Players {
+		if player == nil || player.Status == engine.StatusOut || player.Status == engine.StatusSittingOut {
+			continue
+		}
+		if player.ID == s.HumanID {
+			ready[player.ID] = false
+			continue
+		}
+		ready[player.ID] = true
+	}
+	s.readyState = &ReadyState{
+		HandID:            summary.HandID,
+		Snapshot:          boundarySnapshot,
+		Ready:             ready,
+		HumanPending:      true,
+		HumanCanLeave:     true,
+		LastSummary:       summary,
+		LastResultMessage: fmt.Sprintf("Hand #%d complete. Press Enter for the next hand or L to leave the table.", summary.HandID),
+	}
+	promptSeq, ok := s.emitEnvelope(Envelope{
+		HandID:   summary.HandID,
+		Snapshot: cloneBoundarySnapshot(boundarySnapshot),
+		Prompt: &Prompt{
+			Kind:     PromptKindBetweenHands,
+			PlayerID: s.HumanID,
+			HandID:   summary.HandID,
+			View: engine.PlayerView{
+				MyID:    s.HumanID,
+				MyCards: s.readyState.Snapshot.HumanCards,
+				MyStack: currentHumanStack(s),
+				Board:   append([]engine.Card(nil), s.readyState.Snapshot.Board...),
+				Street:  s.readyState.Snapshot.Street,
+				Pot:     s.readyState.Snapshot.Pot,
+			},
+		},
+		Notice: &Notice{Type: "waiting_for_ready", Message: s.readyState.LastResultMessage},
+	})
+	if !ok {
+		return false
+	}
+	if s.readyState != nil {
+		s.readyState.Ready[s.HumanID] = false
+		_ = promptSeq
+	}
+	return true
+}
+
+func (s *Session) waitForHumanReadyDecision() bool {
+	if s.readyState == nil {
+		return true
+	}
+	for {
+		var intent PlayerActionIntent
+		select {
+		case <-s.stop:
+			return false
+		case intent = <-s.ActionResp:
+		}
+		if intent.PromptSeq == 0 || intent.HandID != s.readyState.HandID {
+			s.emitReadyPromptError("That hand boundary prompt expired. Use the current prompt.", "stale_action")
+			continue
+		}
+		switch intent.Control.Kind {
+		case ControlIntentReadyNextHand:
+			s.readyState.Ready[s.HumanID] = true
+			s.readyState.HumanPending = false
+			s.readyState = nil
+			s.Phase = PhasePlayingHand
+			return true
+		case ControlIntentLeaveTable:
+			s.readyState.Ready[s.HumanID] = true
+			s.readyState.HumanPending = false
+			s.readyState = nil
+			s.Phase = PhaseSessionOver
+			s.emitSessionEndFromLeave()
+			return false
+		default:
+			s.emitReadyPromptError("Choose Enter for the next hand or L to leave the table.", "invalid_action")
+		}
+	}
+}
+
+func (s *Session) emitReadyPromptError(message, code string) {
+	if s.readyState == nil {
+		return
+	}
+	view := engine.PlayerView{
+		MyID:    s.HumanID,
+		MyCards: s.readyState.Snapshot.HumanCards,
+		MyStack: currentHumanStack(s),
+		Board:   append([]engine.Card(nil), s.readyState.Snapshot.Board...),
+		Street:  s.readyState.Snapshot.Street,
+		Pot:     s.readyState.Snapshot.Pot,
+	}
+	s.emitEnvelope(Envelope{
+		HandID:   s.readyState.HandID,
+		Snapshot: cloneBoundarySnapshot(s.readyState.Snapshot),
+		Prompt: &Prompt{
+			Kind:     PromptKindBetweenHands,
+			PlayerID: s.HumanID,
+			HandID:   s.readyState.HandID,
+			View:     view,
+		},
+		Notice: &Notice{Type: "waiting_for_ready", Message: s.readyState.LastResultMessage},
+		Error:  &SessionError{Code: code, Message: message},
+	})
+}
+
+func (s *Session) emitResumedBoundaryPrompt() bool {
+	if s.readyState == nil {
+		return true
+	}
+	if s.Phase != PhaseWaitingReady {
+		return true
+	}
+	_, ok := s.emitEnvelope(Envelope{
+		HandID:   s.readyState.HandID,
+		Snapshot: cloneBoundarySnapshot(s.readyState.Snapshot),
+		Prompt: &Prompt{
+			Kind:     PromptKindBetweenHands,
+			PlayerID: s.HumanID,
+			HandID:   s.readyState.HandID,
+			View: engine.PlayerView{
+				MyID:    s.HumanID,
+				MyCards: s.readyState.Snapshot.HumanCards,
+				MyStack: currentHumanStack(s),
+				Board:   append([]engine.Card(nil), s.readyState.Snapshot.Board...),
+				Street:  s.readyState.Snapshot.Street,
+				Pot:     s.readyState.Snapshot.Pot,
+			},
+		},
+		Notice: &Notice{Type: "waiting_for_ready", Message: s.readyState.LastResultMessage},
+	})
+	return ok
+}
+
+func (s *Session) emitSessionEndFromLeave() {
+	if err := s.persistSessionSummary(); err != nil {
+		s.emitEnvelope(Envelope{Error: &SessionError{Code: "session_error", Message: fmt.Sprintf("Unable to persist session summary: %v", err)}})
+		return
+	}
+	msg := "You left the table. Session closed cleanly."
+	if s.Config.Mode == engine.ModeCashGame {
+		profit := currentHumanStack(s) - s.startingChips()
+		if profit >= 0 {
+			msg = fmt.Sprintf("You left the table with %d chips profit.", profit)
+		} else {
+			msg = fmt.Sprintf("You left the table down %d chips.", -profit)
+		}
+	}
+	s.emitEnvelope(Envelope{Notice: &Notice{Type: "session_ended", Message: msg}})
+}
+
 // recordHand saves the hand to history and transcript.
 func (s *Session) recordHand(hand *engine.Hand) error {
 	anchor, err := s.deps.TimeAnchorProvider.Now()
@@ -629,15 +814,20 @@ func (s *Session) IsHuman(pid engine.PlayerID) bool {
 
 // TableState returns a snapshot of all player stacks and statuses.
 type TableState struct {
-	Players    []PlayerInfo
-	HandNum    int
-	HandID     int
-	Blinds     engine.BlindLevel
-	Board      []engine.Card
-	Pot        int
-	Street     engine.Street
-	DealerSeat int
-	HumanCards [2]engine.Card
+	Players         []PlayerInfo
+	HandNum         int
+	HandID          int
+	Blinds          engine.BlindLevel
+	Board           []engine.Card
+	Pot             int
+	Street          engine.Street
+	DealerSeat      int
+	HumanCards      [2]engine.Card
+	Boundary        bool
+	Showdown        bool
+	Revealed        []RevealedHand
+	ShowdownPayouts []ShowdownPayout
+	PotAwards       []string
 }
 
 type PlayerInfo struct {
@@ -656,6 +846,9 @@ func (s *Session) TableState() TableState {
 }
 
 func (s *Session) snapshot() TableState {
+	if s.Phase == PhaseWaitingReady && s.readyState != nil {
+		return cloneBoundarySnapshot(s.readyState.Snapshot)
+	}
 	ts := TableState{
 		HandNum: s.HandCount,
 		Blinds:  s.Table.CurrentBlinds(),
@@ -694,6 +887,52 @@ func (s *Session) snapshot() TableState {
 	return ts
 }
 
+func cloneBoundarySnapshot(snapshot TableState) TableState {
+	copyState := snapshot
+	copyState.Players = clonePlayers(snapshot.Players)
+	copyState.Board = append([]engine.Card(nil), snapshot.Board...)
+	copyState.Revealed = cloneRevealedHands(snapshot.Revealed)
+	copyState.ShowdownPayouts = cloneShowdownPayouts(snapshot.ShowdownPayouts)
+	copyState.PotAwards = append([]string(nil), snapshot.PotAwards...)
+	return copyState
+}
+
+func (s *Session) buildBoundarySnapshot() TableState {
+	snapshot := s.snapshot()
+	snapshot.Boundary = true
+	snapshot.Showdown, snapshot.Revealed, snapshot.ShowdownPayouts, snapshot.PotAwards = s.boundaryShowdownState()
+	return snapshot
+}
+
+func (s *Session) boundaryShowdownState() (bool, []RevealedHand, []ShowdownPayout, []string) {
+	if s.currentHand == nil {
+		return false, nil, nil, nil
+	}
+	revealed := make([]RevealedHand, 0)
+	payouts := make([]ShowdownPayout, 0)
+	potAwards := make([]string, 0)
+	for _, event := range s.currentHand.Events {
+		switch e := event.(type) {
+		case engine.HandRevealedEvent:
+			revealed = append(revealed, RevealedHand{
+				PlayerID: e.PlayerID,
+				Name:     s.PlayerName(e.PlayerID),
+				Cards:    e.Cards,
+				Eval:     e.Eval.Name,
+			})
+		case engine.PotAwardedEvent:
+			payouts = append(payouts, ShowdownPayout{
+				PotIndex: e.PotIndex,
+				Winners:  append([]engine.PlayerID(nil), e.Winners...),
+				Amount:   e.Amount,
+				OddChip:  e.OddChip,
+			})
+			potAwards = append(potAwards, formatPotAwardMessage(s, e))
+		}
+	}
+	return len(revealed) > 0 || len(potAwards) > 0, revealed, payouts, potAwards
+}
+
 func (s *Session) emitEnvelope(env Envelope) (uint64, bool) {
 	if env.Snapshot.Players == nil {
 		env.Snapshot = s.snapshot()
@@ -708,6 +947,9 @@ func (s *Session) emitEnvelope(env Envelope) (uint64, bool) {
 		env.Prompt.Seq = env.Seq
 		if env.Prompt.HandID == 0 {
 			env.Prompt.HandID = env.HandID
+		}
+		if env.Prompt.Kind == PromptKindAction {
+			env.Prompt.Kind = PromptKindAction
 		}
 	}
 	select {

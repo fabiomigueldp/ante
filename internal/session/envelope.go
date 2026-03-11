@@ -2,9 +2,29 @@ package session
 
 import "github.com/fabiomigueldp/ante/internal/engine"
 
+type PromptKind uint8
+
+const (
+	PromptKindAction PromptKind = iota
+	PromptKindBetweenHands
+)
+
+type ControlIntentKind uint8
+
+const (
+	ControlIntentUnknown ControlIntentKind = iota
+	ControlIntentReadyNextHand
+	ControlIntentLeaveTable
+)
+
+type ControlIntent struct {
+	Kind ControlIntentKind
+}
+
 type Prompt struct {
 	Seq          uint64
 	HandID       int
+	Kind         PromptKind
 	PlayerID     engine.PlayerID
 	View         engine.PlayerView
 	LegalActions []engine.LegalAction
@@ -39,6 +59,7 @@ type PlayerActionIntent struct {
 	PromptSeq uint64
 	HandID    int
 	Action    engine.Action
+	Control   ControlIntent
 }
 
 func (e Envelope) IsTerminal() bool {

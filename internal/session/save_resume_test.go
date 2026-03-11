@@ -29,6 +29,23 @@ func TestSaveResumeRoundTripAfterFirstHandBoundary(t *testing.T) {
 	if !sess.CanSave() {
 		t.Fatal("expected session to be saveable at hand boundary")
 	}
+	if sess.Phase != PhaseWaitingReady {
+		t.Fatalf("phase = %d, want PhaseWaitingReady", sess.Phase)
+	}
+	sess.readyState.Snapshot.Boundary = true
+	sess.readyState.Snapshot.Showdown = true
+	sess.readyState.Snapshot.Revealed = []RevealedHand{{
+		PlayerID: 2,
+		Name:     "Bot",
+		Cards:    [2]engine.Card{engine.NewCard(engine.Ace, engine.Spades), engine.NewCard(engine.Ace, engine.Hearts)},
+		Eval:     "One Pair",
+	}}
+	sess.readyState.Snapshot.ShowdownPayouts = []ShowdownPayout{{
+		PotIndex: 0,
+		Winners:  []engine.PlayerID{2},
+		Amount:   22,
+	}}
+	sess.readyState.Snapshot.PotAwards = []string{"Bot wins 22"}
 
 	save, err := sess.BuildSaveArtifact()
 	if err != nil {
@@ -70,6 +87,46 @@ func TestSaveResumeRoundTripAfterFirstHandBoundary(t *testing.T) {
 	}
 	if resumed.seq != sess.seq {
 		t.Fatalf("seq = %d, want %d", resumed.seq, sess.seq)
+	}
+	if resumed.Phase != PhaseWaitingReady {
+		t.Fatalf("resumed phase = %d, want PhaseWaitingReady", resumed.Phase)
+	}
+	if resumed.readyState == nil || !resumed.readyState.HumanPending {
+		t.Fatal("expected resumed session to restore waiting-ready boundary state")
+	}
+	if resumed.readyState.Snapshot.HandID != sess.readyState.Snapshot.HandID {
+		t.Fatalf("ready snapshot hand id = %d, want %d", resumed.readyState.Snapshot.HandID, sess.readyState.Snapshot.HandID)
+	}
+	if ok := resumed.emitResumedBoundaryPrompt(); !ok {
+		t.Fatal("expected resumed boundary prompt to be emitted")
+	}
+	env := <-resumed.Updates
+	if env.Prompt == nil || env.Prompt.Kind != PromptKindBetweenHands {
+		t.Fatalf("expected between-hands prompt on resume, got %+v", env.Prompt)
+	}
+	if env.Snapshot.HandID != resumed.readyState.Snapshot.HandID {
+		t.Fatalf("resumed envelope hand id = %d, want %d", env.Snapshot.HandID, resumed.readyState.Snapshot.HandID)
+	}
+	if env.Snapshot.Pot != resumed.readyState.Snapshot.Pot {
+		t.Fatalf("resumed envelope pot = %d, want %d", env.Snapshot.Pot, resumed.readyState.Snapshot.Pot)
+	}
+	if !equalCards(env.Snapshot.Board, resumed.readyState.Snapshot.Board) {
+		t.Fatalf("resumed envelope board = %+v, want %+v", env.Snapshot.Board, resumed.readyState.Snapshot.Board)
+	}
+	if env.Snapshot.HumanCards != resumed.readyState.Snapshot.HumanCards {
+		t.Fatalf("resumed envelope human cards = %+v, want %+v", env.Snapshot.HumanCards, resumed.readyState.Snapshot.HumanCards)
+	}
+	if !env.Snapshot.Showdown {
+		t.Fatal("expected resumed envelope to preserve showdown visibility")
+	}
+	if len(env.Snapshot.Revealed) != 1 || env.Snapshot.Revealed[0].Name != "Bot" {
+		t.Fatalf("expected resumed envelope to preserve revealed hands, got %+v", env.Snapshot.Revealed)
+	}
+	if len(env.Snapshot.ShowdownPayouts) != 1 || env.Snapshot.ShowdownPayouts[0].Amount != 22 {
+		t.Fatalf("expected resumed envelope to preserve structured payouts, got %+v", env.Snapshot.ShowdownPayouts)
+	}
+	if len(env.Snapshot.PotAwards) != 1 || env.Snapshot.PotAwards[0] != "Bot wins 22" {
+		t.Fatalf("expected resumed envelope to preserve pot awards, got %+v", env.Snapshot.PotAwards)
 	}
 	if len(resumed.Table.Players) != len(sess.Table.Players) {
 		t.Fatalf("len(players) = %d, want %d", len(resumed.Table.Players), len(sess.Table.Players))
@@ -159,6 +216,10 @@ func playExactlyOneHand(t *testing.T, sess *Session) {
 				return
 			case env := <-sess.Updates:
 				if env.Prompt != nil {
+					if env.Prompt.Kind == PromptKindBetweenHands {
+						sess.ActionResp <- PlayerActionIntent{PromptSeq: env.Prompt.Seq, HandID: env.Prompt.HandID, Control: ControlIntent{Kind: ControlIntentReadyNextHand}}
+						continue
+					}
 					sess.ActionResp <- PlayerActionIntent{PromptSeq: env.Prompt.Seq, HandID: env.Prompt.HandID, Action: defaultActionForPrompt(env.Prompt)}
 				}
 			}
@@ -180,6 +241,9 @@ func playExactlyOneHand(t *testing.T, sess *Session) {
 	}
 	if err := sess.recordHand(hand); err != nil {
 		t.Fatalf("recordHand error: %v", err)
+	}
+	if !sess.beginBetweenHands(summary) {
+		t.Fatal("expected session to enter between-hands state")
 	}
 	if summary.HandID != hand.ID {
 		t.Fatalf("summary hand id = %d, want %d", summary.HandID, hand.ID)

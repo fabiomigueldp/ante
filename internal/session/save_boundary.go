@@ -21,10 +21,7 @@ func (s *Session) CanSave() bool {
 	if s == nil {
 		return false
 	}
-	if s.currentHand == nil {
-		return true
-	}
-	return s.currentHand.Phase == engine.PhaseComplete
+	return s.Phase == PhaseWaitingReady && s.readyState != nil && s.readyState.HumanPending
 }
 
 func (s *Session) BuildSaveArtifact() (*storage.SaveSlot, error) {
@@ -43,18 +40,19 @@ func (s *Session) BuildSaveArtifact() (*storage.SaveSlot, error) {
 		return nil, err
 	}
 	slot := &storage.SaveSlot{
-		SchemaVersion: 1,
-		SessionID:     s.SessionID,
-		LastSeq:       s.seq,
-		Name:          defaultSaveName(s),
-		Timestamp:     anchor.Timestamp,
-		Mode:          modeString(s.Config.Mode),
-		HandNumber:    s.HandCount,
-		PlayerName:    s.Config.PlayerName,
-		PlayerStack:   currentHumanStack(s),
-		TotalPlayers:  len(s.Table.Players),
-		ActivePlayers: len(s.Table.ActivePlayers()),
-		BlindLevel:    s.Table.CurrentBlinds().Level,
+		SchemaVersion:  1,
+		SessionID:      s.SessionID,
+		LastSeq:        s.seq,
+		LifecyclePhase: saveLifecyclePhase(s.Phase),
+		Name:           defaultSaveName(s),
+		Timestamp:      anchor.Timestamp,
+		Mode:           modeString(s.Config.Mode),
+		HandNumber:     s.HandCount,
+		PlayerName:     s.Config.PlayerName,
+		PlayerStack:    currentHumanStack(s),
+		TotalPlayers:   len(s.Table.Players),
+		ActivePlayers:  len(s.Table.ActivePlayers()),
+		BlindLevel:     s.Table.CurrentBlinds().Level,
 		TableData: storage.TableSaveData{
 			Mode:         s.Table.Mode,
 			Seats:        s.Table.Seats,
@@ -83,6 +81,16 @@ func (s *Session) BuildSaveArtifact() (*storage.SaveSlot, error) {
 	}
 	if s.metrics != nil {
 		slot.Metrics = s.metrics.Snapshot()
+	}
+	if s.readyState != nil {
+		slot.Boundary = storage.BoundaryStateSave{
+			Active:          true,
+			HandID:          s.readyState.HandID,
+			Snapshot:        saveBoundarySnapshot(s.readyState.Snapshot),
+			HumanPending:    s.readyState.HumanPending,
+			HumanCanLeave:   s.readyState.HumanCanLeave,
+			LastResultLabel: s.readyState.LastResultMessage,
+		}
 	}
 	for playerID, bot := range s.Bots {
 		state := bot.State()
@@ -235,4 +243,76 @@ func difficultyCode(difficulty ai.Difficulty) int {
 	default:
 		return 1
 	}
+}
+
+func saveLifecyclePhase(phase Phase) string {
+	switch phase {
+	case PhasePlayingHand:
+		return "playing_hand"
+	case PhaseWaitingReady:
+		return "waiting_ready"
+	case PhaseSessionOver:
+		return "session_over"
+	default:
+		return "setup"
+	}
+}
+
+func saveBoundarySnapshot(snapshot TableState) storage.TableSaveBoundaryState {
+	return storage.TableSaveBoundaryState{
+		HandNum:    snapshot.HandNum,
+		HandID:     snapshot.HandID,
+		Blinds:     snapshot.Blinds,
+		Board:      append([]engine.Card(nil), snapshot.Board...),
+		Pot:        snapshot.Pot,
+		Street:     snapshot.Street,
+		DealerSeat: snapshot.DealerSeat,
+		HumanCards: snapshot.HumanCards,
+		Players:    makeBoundaryPlayers(snapshot.Players),
+		Showdown:   snapshot.Showdown,
+		Revealed:   makeBoundaryRevealed(snapshot.Revealed),
+		Payouts:    makeBoundaryPayouts(snapshot.ShowdownPayouts),
+		PotAwards:  append([]string(nil), snapshot.PotAwards...),
+	}
+}
+
+func makeBoundaryPlayers(players []PlayerInfo) []storage.PlayerSaveData {
+	out := make([]storage.PlayerSaveData, 0, len(players))
+	for _, player := range players {
+		out = append(out, storage.PlayerSaveData{
+			ID:        player.ID,
+			Name:      player.Name,
+			Stack:     player.Stack,
+			Status:    player.Status,
+			SeatIndex: player.Seat,
+			IsHuman:   player.IsHuman,
+		})
+	}
+	return out
+}
+
+func makeBoundaryRevealed(hands []RevealedHand) []storage.BoundaryRevealedSave {
+	out := make([]storage.BoundaryRevealedSave, 0, len(hands))
+	for _, hand := range hands {
+		out = append(out, storage.BoundaryRevealedSave{
+			PlayerID: hand.PlayerID,
+			Name:     hand.Name,
+			Cards:    hand.Cards,
+			Eval:     hand.Eval,
+		})
+	}
+	return out
+}
+
+func makeBoundaryPayouts(payouts []ShowdownPayout) []storage.BoundaryPayoutSave {
+	out := make([]storage.BoundaryPayoutSave, 0, len(payouts))
+	for _, payout := range payouts {
+		out = append(out, storage.BoundaryPayoutSave{
+			PotIndex: payout.PotIndex,
+			Winners:  append([]engine.PlayerID(nil), payout.Winners...),
+			Amount:   payout.Amount,
+			OddChip:  payout.OddChip,
+		})
+	}
+	return out
 }
