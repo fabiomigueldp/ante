@@ -1,9 +1,7 @@
 package storage
 
 import (
-	"encoding/gob"
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -12,62 +10,61 @@ import (
 
 // SaveSlot holds a serializable game state.
 type SaveSlot struct {
-	Name          string
-	Timestamp     time.Time
-	Mode          string
-	HandNumber    int
-	PlayerName    string
-	PlayerStack   int
-	TotalPlayers  int
-	ActivePlayers int
-	BlindLevel    int
+	Name          string    `json:"name"`
+	Timestamp     time.Time `json:"timestamp"`
+	Mode          string    `json:"mode"`
+	HandNumber    int       `json:"hand_number"`
+	PlayerName    string    `json:"player_name"`
+	PlayerStack   int       `json:"player_stack"`
+	TotalPlayers  int       `json:"total_players"`
+	ActivePlayers int       `json:"active_players"`
+	BlindLevel    int       `json:"blind_level"`
 
-	// Serializable game state
-	TableData TableSaveData
-	Players   []PlayerSaveData
-	BotSeeds  map[engine.PlayerID]int64
-	Config    GameConfig
-	History   []HandRecordSave
+	TableData TableSaveData             `json:"table_data"`
+	Players   []PlayerSaveData          `json:"players"`
+	BotSeeds  map[engine.PlayerID]int64 `json:"bot_seeds"`
+	Config    GameConfig                `json:"config"`
+	History   []HandRecordSave          `json:"history"`
 }
 
 type TableSaveData struct {
-	Mode         engine.GameMode
-	Seats        int
-	DealerSeat   int
-	HandNumber   int
-	CurrentLevel int
-	MasterSeed   int64
-	BlindsConfig engine.BlindStructure
+	Mode         engine.GameMode       `json:"mode"`
+	Seats        int                   `json:"seats"`
+	DealerSeat   int                   `json:"dealer_seat"`
+	HandNumber   int                   `json:"hand_number"`
+	CurrentLevel int                   `json:"current_level"`
+	MasterSeed   int64                 `json:"master_seed"`
+	BlindsConfig engine.BlindStructure `json:"blinds_config"`
 }
 
 type PlayerSaveData struct {
-	ID        engine.PlayerID
-	Name      string
-	Stack     int
-	Status    engine.PlayerStatus
-	SeatIndex int
-	IsHuman   bool
-	BotID     string // character ID for bots
+	ID        engine.PlayerID     `json:"id"`
+	Name      string              `json:"name"`
+	Stack     int                 `json:"stack"`
+	Status    engine.PlayerStatus `json:"status"`
+	SeatIndex int                 `json:"seat_index"`
+	IsHuman   bool                `json:"is_human"`
+	BotID     string              `json:"bot_id"`
 }
 
 type GameConfig struct {
-	Mode           engine.GameMode
-	Difficulty     int
-	Seats          int
-	StartingStack  int
-	BlindSpeed     string
-	PlayerName     string
-	Seed           int64
-	CashGameBuyIn  int
-	CashGameBlinds [2]int
+	Mode           engine.GameMode `json:"mode"`
+	Difficulty     int             `json:"difficulty"`
+	Seats          int             `json:"seats"`
+	StartingStack  int             `json:"starting_stack"`
+	BlindSpeed     string          `json:"blind_speed"`
+	PlayerName     string          `json:"player_name"`
+	Seed           int64           `json:"seed"`
+	CashGameBuyIn  int             `json:"cash_game_buy_in"`
+	CashGameBlinds [2]int          `json:"cash_game_blinds"`
 }
 
 type HandRecordSave struct {
-	HandID     int
-	DealerSeat int
-	Board      []engine.Card
-	Actions    []engine.Action
-	Timestamp  time.Time
+	HandID     int             `json:"hand_id"`
+	DealerSeat int             `json:"dealer_seat"`
+	Board      []engine.Card   `json:"board"`
+	Actions    []engine.Action `json:"actions"`
+	Timestamp  time.Time       `json:"timestamp"`
 }
 
 func savesDir() (string, error) {
@@ -75,88 +72,47 @@ func savesDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	d := filepath.Join(dir, "saves")
-	return d, os.MkdirAll(d, 0o755)
+	return filepath.Join(dir, "saves"), nil
 }
 
 func SaveGame(slot int, save *SaveSlot) error {
-	dir, err := savesDir()
-	if err != nil {
-		return err
+	if save == nil {
+		return fmt.Errorf("save slot cannot be nil")
 	}
-	path := filepath.Join(dir, fmt.Sprintf("slot_%d.gob", slot))
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return gob.NewEncoder(f).Encode(save)
+	_, err := DefaultArtifactStore().SaveSaveArtifact(slot, *save)
+	return err
 }
 
 func LoadGame(slot int) (*SaveSlot, error) {
-	dir, err := savesDir()
+	artifact, err := DefaultArtifactStore().LoadSaveArtifact(slot)
 	if err != nil {
 		return nil, err
 	}
-	path := filepath.Join(dir, fmt.Sprintf("slot_%d.gob", slot))
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	var save SaveSlot
-	if err := gob.NewDecoder(f).Decode(&save); err != nil {
-		return nil, err
-	}
+	save := artifact.Payload
 	return &save, nil
 }
 
 func DeleteSave(slot int) error {
-	dir, err := savesDir()
-	if err != nil {
-		return err
-	}
-	path := filepath.Join(dir, fmt.Sprintf("slot_%d.gob", slot))
-	return os.Remove(path)
+	return DefaultArtifactStore().DeleteSaveArtifact(slot)
+}
+
+func ListSavesResult() ([]SaveInfo, error) {
+	return DefaultArtifactStore().ListSaveArtifacts(DefaultSaveSlotCount)
 }
 
 func ListSaves() []SaveInfo {
-	dir, err := savesDir()
-	if err != nil {
-		return nil
-	}
-	var saves []SaveInfo
-	for i := 1; i <= 5; i++ {
-		path := filepath.Join(dir, fmt.Sprintf("slot_%d.gob", i))
-		info, err := os.Stat(path)
-		if err != nil {
-			saves = append(saves, SaveInfo{Slot: i, Empty: true})
-			continue
-		}
-		slot, err := LoadGame(i)
-		if err != nil {
-			saves = append(saves, SaveInfo{Slot: i, Empty: true})
-			continue
-		}
-		saves = append(saves, SaveInfo{
-			Slot:      i,
-			Empty:     false,
-			Name:      slot.Name,
-			Mode:      slot.Mode,
-			HandNum:   slot.HandNumber,
-			Stack:     slot.PlayerStack,
-			Timestamp: info.ModTime(),
-		})
-	}
+	saves, _ := ListSavesResult()
 	return saves
 }
 
 type SaveInfo struct {
-	Slot      int
-	Empty     bool
-	Name      string
-	Mode      string
-	HandNum   int
-	Stack     int
-	Timestamp time.Time
+	Slot         int       `json:"slot"`
+	Empty        bool      `json:"empty"`
+	Name         string    `json:"name"`
+	Mode         string    `json:"mode"`
+	HandNum      int       `json:"hand_num"`
+	Stack        int       `json:"stack"`
+	Timestamp    time.Time `json:"timestamp"`
+	Incompatible bool      `json:"incompatible,omitempty"`
+	Error        string    `json:"error,omitempty"`
 }

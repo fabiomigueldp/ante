@@ -1,8 +1,6 @@
 package storage
 
 import (
-	"encoding/gob"
-	"os"
 	"path/filepath"
 	"time"
 )
@@ -10,13 +8,13 @@ import (
 // SessionStats records statistics for a completed session.
 type SessionStats struct {
 	ID            string    `json:"id"`
-	Mode          string    `json:"mode"` // "tournament", "cash", "headsup"
+	Mode          string    `json:"mode"`
 	StartTime     time.Time `json:"start_time"`
 	EndTime       time.Time `json:"end_time"`
 	HandsPlayed   int       `json:"hands_played"`
-	FinalPosition int       `json:"final_position"` // tournament: 1=winner
+	FinalPosition int       `json:"final_position"`
 	TotalPlayers  int       `json:"total_players"`
-	ChipsWon      int       `json:"chips_won"` // net profit/loss
+	ChipsWon      int       `json:"chips_won"`
 	BiggestPot    int       `json:"biggest_pot"`
 	HandsWon      int       `json:"hands_won"`
 	FlopsSeen     int       `json:"flops_seen"`
@@ -26,12 +24,12 @@ type SessionStats struct {
 	AllInsSeen    int       `json:"allins_seen"`
 	BestHand      string    `json:"best_hand"`
 	LargestWin    int       `json:"largest_win"`
-	LongestStreak int       `json:"longest_streak"` // consecutive wins
+	LongestStreak int       `json:"longest_streak"`
 }
 
 // StatsStore holds all session statistics.
 type StatsStore struct {
-	Sessions []SessionStats
+	Sessions []SessionStats `json:"sessions"`
 }
 
 func statsPath() (string, error) {
@@ -42,34 +40,31 @@ func statsPath() (string, error) {
 	return filepath.Join(dir, "stats.gob"), nil
 }
 
+func LoadStatsResult() (*StatsStore, error) {
+	artifact, err := DefaultArtifactStore().LoadStatsArtifact()
+	if err == nil {
+		return &artifact.Payload, nil
+	}
+	if err == ErrArtifactNotFound {
+		return &StatsStore{}, nil
+	}
+	return &StatsStore{}, err
+}
+
 func LoadStats() *StatsStore {
-	path, err := statsPath()
+	store, err := LoadStatsResult()
 	if err != nil {
 		return &StatsStore{}
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return &StatsStore{}
-	}
-	defer f.Close()
-	var store StatsStore
-	if err := gob.NewDecoder(f).Decode(&store); err != nil {
-		return &StatsStore{}
-	}
-	return &store
+	return store
 }
 
 func SaveStats(store *StatsStore) error {
-	path, err := statsPath()
-	if err != nil {
-		return err
+	if store == nil {
+		store = &StatsStore{}
 	}
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return gob.NewEncoder(f).Encode(store)
+	_, err := DefaultArtifactStore().SaveStatsArtifact(*store)
+	return err
 }
 
 func (s *StatsStore) Add(stats SessionStats) {
@@ -77,6 +72,7 @@ func (s *StatsStore) Add(stats SessionStats) {
 }
 
 func (s *StatsStore) TotalSessions() int { return len(s.Sessions) }
+
 func (s *StatsStore) TotalHandsPlayed() int {
 	total := 0
 	for _, sess := range s.Sessions {

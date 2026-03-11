@@ -1,10 +1,6 @@
 package storage
 
-import (
-	"encoding/json"
-	"os"
-	"path/filepath"
-)
+import "path/filepath"
 
 // Config holds all user-configurable settings.
 type Config struct {
@@ -12,12 +8,12 @@ type Config struct {
 	SoundEnabled   bool   `json:"sound_enabled"`
 	SoundVolume    int    `json:"sound_volume"`
 	ShowPotOdds    bool   `json:"show_pot_odds"`
-	AnimationSpeed string `json:"animation_speed"` // "slow", "normal", "fast", "off"
-	DefaultMode    string `json:"default_mode"`    // "tournament", "cash", "headsup"
+	AnimationSpeed string `json:"animation_speed"`
+	DefaultMode    string `json:"default_mode"`
 	DefaultSeats   int    `json:"default_seats"`
-	DefaultDiff    string `json:"default_difficulty"` // "easy", "medium", "hard"
-	StartingStack  int    `json:"starting_stack"`     // in BB
-	Theme          string `json:"theme"`              // "classic", "dark", "green"
+	DefaultDiff    string `json:"default_difficulty"`
+	StartingStack  int    `json:"starting_stack"`
+	Theme          string `json:"theme"`
 }
 
 func DefaultConfig() Config {
@@ -35,15 +31,6 @@ func DefaultConfig() Config {
 	}
 }
 
-func configDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	dir := filepath.Join(home, ".ante")
-	return dir, os.MkdirAll(dir, 0o755)
-}
-
 func configPath() (string, error) {
 	dir, err := configDir()
 	if err != nil {
@@ -52,34 +39,30 @@ func configPath() (string, error) {
 	return filepath.Join(dir, "config.json"), nil
 }
 
+func LoadConfigResult() (Config, error) {
+	artifact, err := DefaultArtifactStore().LoadConfigArtifact()
+	if err == nil {
+		artifact.Payload.SoundVolume = clampInt(artifact.Payload.SoundVolume, 0, 100)
+		return artifact.Payload, nil
+	}
+	if err == ErrArtifactNotFound {
+		return DefaultConfig(), nil
+	}
+	return DefaultConfig(), err
+}
+
 func LoadConfig() Config {
-	path, err := configPath()
+	cfg, err := LoadConfigResult()
 	if err != nil {
 		return DefaultConfig()
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return DefaultConfig()
-	}
-	cfg := DefaultConfig()
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return DefaultConfig()
-	}
-	cfg.SoundVolume = clampInt(cfg.SoundVolume, 0, 100)
 	return cfg
 }
 
 func SaveConfig(cfg Config) error {
 	cfg.SoundVolume = clampInt(cfg.SoundVolume, 0, 100)
-	path, err := configPath()
-	if err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
+	_, err := DefaultArtifactStore().SaveConfigArtifact(cfg)
+	return err
 }
 
 func clampInt(v, min, max int) int {
