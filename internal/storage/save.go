@@ -10,6 +10,9 @@ import (
 
 // SaveSlot holds a serializable game state.
 type SaveSlot struct {
+	SchemaVersion int       `json:"schema_version"`
+	SessionID     string    `json:"session_id,omitempty"`
+	LastSeq       uint64    `json:"last_seq,omitempty"`
 	Name          string    `json:"name"`
 	Timestamp     time.Time `json:"timestamp"`
 	Mode          string    `json:"mode"`
@@ -20,11 +23,15 @@ type SaveSlot struct {
 	ActivePlayers int       `json:"active_players"`
 	BlindLevel    int       `json:"blind_level"`
 
-	TableData TableSaveData             `json:"table_data"`
-	Players   []PlayerSaveData          `json:"players"`
-	BotSeeds  map[engine.PlayerID]int64 `json:"bot_seeds"`
-	Config    GameConfig                `json:"config"`
-	History   []HandRecordSave          `json:"history"`
+	TableData  TableSaveData                    `json:"table_data"`
+	Players    []PlayerSaveData                 `json:"players"`
+	BotSeeds   map[engine.PlayerID]int64        `json:"bot_seeds"`
+	BotStates  map[engine.PlayerID]BotStateSave `json:"bot_states,omitempty"`
+	Config     GameConfig                       `json:"config"`
+	History    []HandRecordSave                 `json:"history"`
+	Tournament TournamentSaveData               `json:"tournament,omitempty"`
+	CashGame   CashGameSaveData                 `json:"cash_game,omitempty"`
+	Integrity  TranscriptHash                   `json:"integrity"`
 }
 
 type TableSaveData struct {
@@ -60,11 +67,34 @@ type GameConfig struct {
 }
 
 type HandRecordSave struct {
-	HandID     int             `json:"hand_id"`
-	DealerSeat int             `json:"dealer_seat"`
-	Board      []engine.Card   `json:"board"`
-	Actions    []engine.Action `json:"actions"`
-	Timestamp  time.Time       `json:"timestamp"`
+	HandID     int                     `json:"hand_id"`
+	DealerSeat int                     `json:"dealer_seat"`
+	Blinds     engine.BlindLevel       `json:"blinds"`
+	Players    []engine.PlayerSnapshot `json:"players,omitempty"`
+	Board      []engine.Card           `json:"board"`
+	Actions    []engine.Action         `json:"actions"`
+	Timestamp  time.Time               `json:"timestamp"`
+}
+
+type BotStateSave struct {
+	Seed      int64   `json:"seed"`
+	DrawCount uint64  `json:"draw_count"`
+	TiltLevel float64 `json:"tilt_level"`
+}
+
+type TournamentSaveData struct {
+	HandsAtLevel int                         `json:"hands_at_level"`
+	Eliminations []TournamentEliminationSave `json:"eliminations,omitempty"`
+}
+
+type TournamentEliminationSave struct {
+	PlayerID engine.PlayerID `json:"player_id"`
+	Position int             `json:"position"`
+	HandNum  int             `json:"hand_num"`
+}
+
+type CashGameSaveData struct {
+	Profit map[engine.PlayerID]int `json:"profit,omitempty"`
 }
 
 func savesDir() (string, error) {

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"reflect"
 	"sort"
 	"time"
@@ -80,6 +81,10 @@ func encodeCanonicalValue(buf *bytes.Buffer, value reflect.Value) error {
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 		buf.WriteByte('u')
 		return binary.Write(buf, binary.BigEndian, value.Uint())
+	case reflect.Float32, reflect.Float64:
+		buf.WriteByte('f')
+		bits := math.Float64bits(value.Convert(reflect.TypeOf(float64(0))).Float())
+		return binary.Write(buf, binary.BigEndian, bits)
 	case reflect.String:
 		buf.WriteByte('s')
 		writeCanonicalBytes(buf, []byte(value.String()))

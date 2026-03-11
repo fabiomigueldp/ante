@@ -61,8 +61,8 @@ func TestCanonicalSHA256ChangesWithValue(t *testing.T) {
 }
 
 func TestEncodeCanonicalRejectsUnsupportedKinds(t *testing.T) {
-	_, err := EncodeCanonical(1.25)
+	_, err := EncodeCanonical(complex(1, 2))
 	if err == nil {
-		t.Fatal("expected error for float canonical encoding")
+		t.Fatal("expected error for unsupported canonical encoding")
 	}
 }

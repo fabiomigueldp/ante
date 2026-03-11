@@ -78,10 +78,43 @@ type Bot struct {
 	Character Character
 	RNG       *rand.Rand
 	TiltLevel float64
+	SeedValue int64
+	source    *countingSource
 }
 
 func NewBot(character Character, seed int64) *Bot {
-	return &Bot{Character: character, RNG: rand.New(rand.NewSource(seed))}
+	source := newCountingSource(seed)
+	return &Bot{Character: character, RNG: rand.New(source), SeedValue: seed, source: source}
+}
+
+type BotState struct {
+	Seed      int64
+	DrawCount uint64
+	TiltLevel float64
+}
+
+func NewBotFromState(character Character, state BotState) *Bot {
+	bot := NewBot(character, state.Seed)
+	for range state.DrawCount {
+		bot.RNG.Int63()
+	}
+	bot.TiltLevel = state.TiltLevel
+	return bot
+}
+
+func (b *Bot) State() BotState {
+	if b == nil {
+		return BotState{}
+	}
+	var draws uint64
+	if b.source != nil {
+		draws = b.source.drawCount
+	}
+	return BotState{
+		Seed:      b.SeedValue,
+		DrawCount: draws,
+		TiltLevel: b.TiltLevel,
+	}
 }
 
 func (b *Bot) Decide(view engine.PlayerView) Decision {
@@ -261,4 +294,25 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+type countingSource struct {
+	source    rand.Source
+	seed      int64
+	drawCount uint64
+}
+
+func newCountingSource(seed int64) *countingSource {
+	return &countingSource{source: rand.NewSource(seed), seed: seed}
+}
+
+func (c *countingSource) Int63() int64 {
+	c.drawCount++
+	return c.source.Int63()
+}
+
+func (c *countingSource) Seed(seed int64) {
+	c.seed = seed
+	c.drawCount = 0
+	c.source.Seed(seed)
 }

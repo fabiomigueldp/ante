@@ -8,6 +8,7 @@ import (
 	"github.com/fabiomigueldp/ante/internal/audio"
 	"github.com/fabiomigueldp/ante/internal/engine"
 	"github.com/fabiomigueldp/ante/internal/session"
+	"github.com/fabiomigueldp/ante/internal/storage"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -21,6 +22,9 @@ type (
 
 var playGameSound = audio.Play
 
+var listSaves = storage.ListSavesResult
+var saveSessionToSlot = func(sess *session.Session, slot int) error { return sess.SaveToSlot(slot) }
+
 type GameModel struct {
 	width  int
 	height int
@@ -31,8 +35,10 @@ type GameModel struct {
 	betInput string
 	betMode  bool
 
-	showPotOdds bool
-	paused      bool
+	showPotOdds      bool
+	paused           bool
+	localMessage     string
+	localMessageKind session.MessageKind
 
 	handSoundState handSoundState
 }
@@ -111,6 +117,7 @@ func (m GameModel) handleEnvelope(env session.Envelope) (tea.Model, tea.Cmd) {
 	if env.IsTerminal() {
 		return m, nil
 	}
+	m.clearLocalMessage()
 	return m, m.waitForEnvelope()
 }
 
@@ -371,7 +378,17 @@ func (m GameModel) handlePauseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "escape", "esc", "p":
 		m.paused = false
 	case "s":
-		m.paused = false
+		slot, err := nextSaveSlot()
+		if err != nil {
+			m.setLocalMessage(err.Error(), session.MessageKindError)
+			return m, nil
+		}
+		if err := saveSessionToSlot(m.sess, slot); err != nil {
+			m.setLocalMessage(err.Error(), session.MessageKindError)
+			return m, nil
+		}
+		m.setLocalMessage(fmt.Sprintf("Game saved to slot %d.", slot), session.MessageKindInfo)
+		return m, nil
 	case "q":
 		m.sess.Stop()
 		return m, func() tea.Msg { return switchScreenMsg{screen: ScreenMenu} }
@@ -439,7 +456,7 @@ func (m GameModel) renderTable() string {
 		parts = append(parts, m.renderShowdown())
 	}
 	parts = append(parts, m.renderBoardArea(m.width), m.renderHumanArea(human, m.width))
-	if m.vm.Message != "" {
+	if m.messageText() != "" {
 		parts = append(parts, CenterH(m.width).Render(m.renderMessage()))
 	}
 	table := lipgloss.JoinVertical(lipgloss.Left, parts...)
@@ -451,10 +468,14 @@ func (m GameModel) renderTable() string {
 }
 
 func (m GameModel) renderMessage() string {
-	if m.vm.MessageKind == session.MessageKindError {
-		return StyleError.Render(m.vm.Message)
+	message := m.messageText()
+	if message == "" {
+		return ""
 	}
-	return StyleInfo.Render(m.vm.Message)
+	if m.messageKind() == session.MessageKindError {
+		return StyleError.Render(message)
+	}
+	return StyleInfo.Render(message)
 }
 
 func (m GameModel) splitPlayers() (*session.PlayerInfo, []session.PlayerInfo) {
@@ -622,7 +643,7 @@ func (m GameModel) renderActionBar() string {
 	}
 
 	extraLine := ""
-	if m.vm.Message != "" {
+	if m.messageText() != "" {
 		extraLine = m.renderMessage()
 	} else if odds := m.potOddsLine(); odds != "" {
 		extraLine = StyleInfo.Render(odds)
@@ -695,18 +716,21 @@ func (m GameModel) potOddsLine() string {
 }
 
 func (m GameModel) renderPauseOverlay() string {
+	parts := []string{StyleTitle.Render("GAME PAUSED"), ""}
+	if m.localMessage != "" {
+		parts = append(parts, m.renderPauseMessage(), "")
+	}
+	parts = append(parts,
+		StyleKey.Render("[Esc]")+" Resume",
+		StyleKey.Render("[S]")+"   Save Game",
+		StyleKey.Render("[H]")+"   Help",
+		StyleKey.Render("[Q]")+"   Quit to Menu",
+	)
 	menu := lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder()).
 		BorderForeground(ColorGold).
 		Padding(1, 3).
-		Render(lipgloss.JoinVertical(lipgloss.Left,
-			StyleTitle.Render("GAME PAUSED"),
-			"",
-			StyleKey.Render("[Esc]")+" Resume",
-			StyleKey.Render("[S]")+"   Save (next slice)",
-			StyleKey.Render("[H]")+"   Help",
-			StyleKey.Render("[Q]")+"   Quit to Menu",
-		))
+		Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, menu)
 }
 
@@ -727,4 +751,60 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func (m *GameModel) setLocalMessage(message string, kind session.MessageKind) {
+	m.localMessage = message
+	m.localMessageKind = kind
+}
+
+func (m *GameModel) clearLocalMessage() {
+	m.localMessage = ""
+	m.localMessageKind = session.MessageKindNone
+}
+
+func (m GameModel) messageText() string {
+	if m.localMessage != "" {
+		return m.localMessage
+	}
+	return m.vm.Message
+}
+
+func (m GameModel) messageKind() session.MessageKind {
+	if m.localMessage != "" {
+		return m.localMessageKind
+	}
+	return m.vm.MessageKind
+}
+
+func (m GameModel) renderPauseMessage() string {
+	if m.localMessage == "" {
+		return ""
+	}
+	if m.localMessageKind == session.MessageKindError {
+		return StyleError.Render(m.localMessage)
+	}
+	return StyleSuccess.Render(m.localMessage)
+}
+
+func nextSaveSlot() (int, error) {
+	saves, err := listSaves()
+	if err != nil && len(saves) == 0 {
+		return 0, err
+	}
+	for _, save := range saves {
+		if save.Empty {
+			return save.Slot, nil
+		}
+	}
+	if len(saves) == 0 {
+		return 0, session.ErrSaveSlotUnavailable
+	}
+	selected := saves[0]
+	for _, save := range saves[1:] {
+		if save.Timestamp.Before(selected.Timestamp) {
+			selected = save
+		}
+	}
+	return selected.Slot, nil
 }

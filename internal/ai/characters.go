@@ -23,6 +23,15 @@ func Characters() []Character {
 	}
 }
 
+func CharacterByID(id string) (Character, bool) {
+	for _, character := range Characters() {
+		if character.ID == id {
+			return character, true
+		}
+	}
+	return Character{}, false
+}
+
 func beginnerProfile(name, nickname, flavor string, style Style, vpip, pfr, agg, bluff, callDown, trap, tilt float64) Profile {
 	return Profile{Name: name, Nickname: nickname, Flavor: flavor, Style: style, Skill: SkillBeginner, VPIP: vpip, PFR: pfr, Aggression: agg, Bluff: bluff, CallDown: callDown, Trap: trap, Tilt: tilt, ThinkMinMS: 350, ThinkMaxMS: 1800, PositionBias: 0.05, DrawBias: 0.10, LargeBetBias: 0.08, HeroCallBias: callDown, ThreeBetBias: 0.02}
 }

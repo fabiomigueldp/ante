@@ -1,13 +1,16 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/fabiomigueldp/ante/internal/ai"
 	"github.com/fabiomigueldp/ante/internal/audio"
 	"github.com/fabiomigueldp/ante/internal/engine"
 	"github.com/fabiomigueldp/ante/internal/session"
+	"github.com/fabiomigueldp/ante/internal/storage"
 )
 
 func newGameTestModel(t *testing.T) GameModel {
@@ -169,5 +172,54 @@ func TestGameWaitingForHumanPlaysSoundWhenPromptAppears(t *testing.T) {
 
 	if count != 1 {
 		t.Fatalf("your turn sound count = %d, want 1", count)
+	}
+}
+
+func TestPauseSaveShowsMidHandError(t *testing.T) {
+	m := newGameTestModel(t)
+	m.paused = true
+	prevList := listSaves
+	prevSave := saveSessionToSlot
+	listSaves = func() ([]storage.SaveInfo, error) { return []storage.SaveInfo{{Slot: 1, Empty: true}}, nil }
+	saveSessionToSlot = func(_ *session.Session, _ int) error { return session.ErrSaveMidHandNotSupported }
+	defer func() {
+		listSaves = prevList
+		saveSessionToSlot = prevSave
+	}()
+
+	model, _ := m.handlePauseKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	next := model.(GameModel)
+	if next.localMessage != session.ErrSaveMidHandNotSupported.Error() {
+		t.Fatalf("local message = %q, want %q", next.localMessage, session.ErrSaveMidHandNotSupported.Error())
+	}
+	if next.localMessageKind != session.MessageKindError {
+		t.Fatalf("local message kind = %q, want error", next.localMessageKind)
+	}
+}
+
+func TestPauseSaveShowsSuccessMessage(t *testing.T) {
+	m := newGameTestModel(t)
+	m.paused = true
+	prevList := listSaves
+	prevSave := saveSessionToSlot
+	listSaves = func() ([]storage.SaveInfo, error) { return []storage.SaveInfo{{Slot: 2, Empty: true}}, nil }
+	saveSessionToSlot = func(_ *session.Session, slot int) error {
+		if slot != 2 {
+			return errors.New("unexpected slot")
+		}
+		return nil
+	}
+	defer func() {
+		listSaves = prevList
+		saveSessionToSlot = prevSave
+	}()
+
+	model, _ := m.handlePauseKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	next := model.(GameModel)
+	if next.localMessage != "Game saved to slot 2." {
+		t.Fatalf("local message = %q", next.localMessage)
+	}
+	if next.localMessageKind != session.MessageKindInfo {
+		t.Fatalf("local message kind = %q, want info", next.localMessageKind)
 	}
 }

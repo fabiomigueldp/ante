@@ -72,6 +72,7 @@ type Session struct {
 	stop        chan struct{}
 	stopOnce    sync.Once
 	seq         uint64
+	resumed     bool
 }
 
 // New creates a session from config. Does not start the game loop.
@@ -200,13 +201,20 @@ func (s *Session) Run() {
 	defer func() {
 		if r := recover(); r != nil {
 			s.emitEnvelope(Envelope{Error: &SessionError{Code: "session_error", Message: fmt.Sprintf("Session crashed: %v", r)}})
-			_ = debug.Stack()
+			_ = string(debug.Stack())
 		}
 		close(s.Updates)
 	}()
 
 	s.Phase = PhasePlaying
-	if _, ok := s.emitEnvelope(Envelope{Notice: &Notice{Type: "session_started", Message: fmt.Sprintf("Welcome to the table, %s!", s.Config.PlayerName)}}); !ok {
+	if !s.resumed {
+		if _, ok := s.emitEnvelope(Envelope{Notice: &Notice{Type: "session_started", Message: fmt.Sprintf("Welcome to the table, %s!", s.Config.PlayerName)}}); !ok {
+			return
+		}
+	} else {
+		s.resumed = false
+	}
+	if s.isStopped() {
 		return
 	}
 

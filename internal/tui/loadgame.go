@@ -6,20 +6,25 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/fabiomigueldp/ante/internal/session"
 	"github.com/fabiomigueldp/ante/internal/storage"
 )
 
+var resumeSavedSession = session.ResumeFromSlot
+
 // LoadGameModel shows save slots for loading.
 type LoadGameModel struct {
-	width  int
-	height int
-	saves  []storage.SaveInfo
-	cursor int
+	width    int
+	height   int
+	saves    []storage.SaveInfo
+	cursor   int
+	errorMsg string
 }
 
 func NewLoadGameModel() LoadGameModel {
+	saves, _ := storage.ListSavesResult()
 	return LoadGameModel{
-		saves: storage.ListSaves(),
+		saves: saves,
 	}
 }
 
@@ -57,13 +62,23 @@ func (m LoadGameModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "enter":
 			if m.cursor < len(m.saves) && !m.saves[m.cursor].Empty {
-				// TODO: actually load and resume the saved game
-				return m, func() tea.Msg { return switchScreenMsg{screen: ScreenMenu} }
+				if m.saves[m.cursor].Incompatible {
+					m.errorMsg = m.saves[m.cursor].Error
+					return m, nil
+				}
+				sess, err := resumeSavedSession(m.saves[m.cursor].Slot)
+				if err != nil {
+					m.errorMsg = err.Error()
+					return m, nil
+				}
+				m.errorMsg = ""
+				return m, func() tea.Msg { return switchScreenMsg{screen: ScreenGame, data: sess} }
 			}
 		case "d", "delete":
 			if m.cursor < len(m.saves) && !m.saves[m.cursor].Empty {
 				_ = storage.DeleteSave(m.saves[m.cursor].Slot)
-				m.saves = storage.ListSaves()
+				m.saves, _ = storage.ListSavesResult()
+				m.errorMsg = ""
 			}
 		}
 	}
@@ -78,6 +93,9 @@ func (m LoadGameModel) View() string {
 
 	if len(m.saves) == 0 {
 		sections = append(sections, StyleDim.Render("No save slots available."))
+		if m.errorMsg != "" {
+			sections = append(sections, "", StyleError.Render(m.errorMsg))
+		}
 		sections = append(sections, "", StyleDim.Render("[Esc] Back"))
 		content := lipgloss.JoinVertical(lipgloss.Center, sections...)
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
@@ -94,6 +112,9 @@ func (m LoadGameModel) View() string {
 		if save.Empty {
 			line := fmt.Sprintf("Slot %d: %s", save.Slot, StyleDim.Render("(empty)"))
 			sections = append(sections, cursor+style.Render(line))
+		} else if save.Incompatible {
+			line := fmt.Sprintf("Slot %d: %s", save.Slot, StyleError.Render("(incompatible save)"))
+			sections = append(sections, cursor+style.Render(line))
 		} else {
 			line := fmt.Sprintf("Slot %d: %s  %s  Hand #%d  Stack: %s  %s",
 				save.Slot,
@@ -108,6 +129,9 @@ func (m LoadGameModel) View() string {
 	}
 
 	sections = append(sections, "")
+	if m.errorMsg != "" {
+		sections = append(sections, StyleError.Render(m.errorMsg), "")
+	}
 	sections = append(sections, StyleDim.Render("[Enter] Load  |  [D] Delete  |  [Esc] Back"))
 
 	content := lipgloss.JoinVertical(lipgloss.Left, sections...)

@@ -208,6 +208,13 @@ func (a App) switchTo(msg switchScreenMsg) (tea.Model, tea.Cmd) {
 		a.setup = NewSetupModel(a.config)
 	case ScreenLoadGame:
 		a.loadGame = NewLoadGameModel()
+	case ScreenGame:
+		if sess, ok := msg.data.(*session.Session); ok && sess != nil {
+			a.lastSess = sess
+			a.lastResult = ""
+			a.game = NewGameModel(sess, a.config.ShowPotOdds)
+			cmd = a.game.Init()
+		}
 	case ScreenResults:
 		a.results = NewResultsModel(a.lastResult, a.lastSess)
 	case ScreenStats:
