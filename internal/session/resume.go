@@ -80,6 +80,7 @@ func ResumeFromSave(save *storage.SaveSlot) (*Session, error) {
 		CashGameBuyIn:  save.Config.CashGameBuyIn,
 		CashGameBlinds: save.Config.CashGameBlinds,
 	}
+	deps := sessionDependenciesProvider()
 	sess := &Session{
 		Config:     cfg,
 		SessionID:  save.SessionID,
@@ -96,7 +97,22 @@ func ResumeFromSave(save *storage.SaveSlot) (*Session, error) {
 		stop:       make(chan struct{}),
 		seq:        save.LastSeq,
 		resumed:    true,
+		deps:       deps,
 	}
+	metrics := metricsFromSnapshot(save.Metrics)
+	if metrics.startTime.Timestamp.IsZero() {
+		anchor, anchorErr := deps.TimeAnchorProvider.Now()
+		if anchorErr != nil {
+			return nil, anchorErr
+		}
+		metrics = newMetricsAccumulator(anchor)
+	}
+	transcript, err := newTranscriptWriter(deps.ArtifactStore, deps.TimeAnchorProvider, sess.SessionID, cfg.PlayerName, modeString(cfg.Mode), metrics.startTime)
+	if err != nil {
+		return nil, err
+	}
+	sess.metrics = metrics
+	sess.transcript = transcript
 
 	switch cfg.Mode {
 	case engine.ModeTournament, engine.ModeHeadsUpDuel:

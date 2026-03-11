@@ -12,6 +12,7 @@ import (
 
 func TestSaveResumeRoundTripAfterFirstHandBoundary(t *testing.T) {
 	store, _, _ := newSessionTestStore(t)
+	useSessionDependenciesForTest(t, Dependencies{ArtifactStore: store, TimeAnchorProvider: store.TimeAnchorProvider()})
 	sess, err := New(Config{
 		Mode:          engine.ModeTournament,
 		Difficulty:    ai.DifficultyMedium,
@@ -92,6 +93,8 @@ func TestSaveResumeRoundTripAfterFirstHandBoundary(t *testing.T) {
 }
 
 func TestBuildSaveArtifactRejectsMidHand(t *testing.T) {
+	store, _, _ := newSessionTestStore(t)
+	useSessionDependenciesForTest(t, Dependencies{ArtifactStore: store, TimeAnchorProvider: store.TimeAnchorProvider()})
 	sess, err := New(Config{
 		Mode:          engine.ModeTournament,
 		Difficulty:    ai.DifficultyMedium,
@@ -123,6 +126,15 @@ func newSessionTestStore(t *testing.T) (*storage.FileSystemStore, string, storag
 		t.Fatalf("NewFileSystemStore error: %v", err)
 	}
 	return store, root, anchor
+}
+
+func useSessionDependenciesForTest(t *testing.T, deps Dependencies) {
+	t.Helper()
+	old := sessionDependenciesProvider
+	sessionDependenciesProvider = func() Dependencies { return deps }
+	t.Cleanup(func() {
+		sessionDependenciesProvider = old
+	})
 }
 
 type staticAnchorProvider struct {
@@ -166,7 +178,9 @@ func playExactlyOneHand(t *testing.T, sess *Session) {
 	if sess.Tournament == nil {
 		sess.Table.ApplyHandResults(hand)
 	}
-	sess.recordHand(hand)
+	if err := sess.recordHand(hand); err != nil {
+		t.Fatalf("recordHand error: %v", err)
+	}
 	if summary.HandID != hand.ID {
 		t.Fatalf("summary hand id = %d, want %d", summary.HandID, hand.ID)
 	}

@@ -19,6 +19,13 @@ type ArtifactStore interface {
 	ListSaveArtifacts(slots int) ([]SaveInfo, error)
 	LoadTranscriptChunkArtifact(transcriptID, chunkID string) (Artifact[TranscriptChunk], error)
 	SaveTranscriptChunkArtifact(chunk TranscriptChunk) (Artifact[TranscriptChunk], error)
+	LoadTranscriptHeadArtifact(transcriptID string) (Artifact[TranscriptHead], error)
+	SaveTranscriptHeadArtifact(head TranscriptHead) (Artifact[TranscriptHead], error)
+	ListTranscriptHeadArtifacts() ([]Artifact[TranscriptHead], error)
+	ListTranscriptChunkArtifacts(transcriptID string) ([]Artifact[TranscriptChunk], error)
+	LoadSessionSummaryArtifact(sessionID string) (Artifact[SessionSummary], error)
+	SaveSessionSummaryArtifact(summary SessionSummary) (Artifact[SessionSummary], error)
+	ListSessionSummaryArtifacts() ([]Artifact[SessionSummary], error)
 }
 
 type errorStore struct {
@@ -65,6 +72,34 @@ func (s errorStore) SaveTranscriptChunkArtifact(TranscriptChunk) (Artifact[Trans
 	return Artifact[TranscriptChunk]{}, s.err
 }
 
+func (s errorStore) LoadTranscriptHeadArtifact(string) (Artifact[TranscriptHead], error) {
+	return Artifact[TranscriptHead]{}, s.err
+}
+
+func (s errorStore) SaveTranscriptHeadArtifact(TranscriptHead) (Artifact[TranscriptHead], error) {
+	return Artifact[TranscriptHead]{}, s.err
+}
+
+func (s errorStore) ListTranscriptHeadArtifacts() ([]Artifact[TranscriptHead], error) {
+	return nil, s.err
+}
+
+func (s errorStore) ListTranscriptChunkArtifacts(string) ([]Artifact[TranscriptChunk], error) {
+	return nil, s.err
+}
+
+func (s errorStore) LoadSessionSummaryArtifact(string) (Artifact[SessionSummary], error) {
+	return Artifact[SessionSummary]{}, s.err
+}
+
+func (s errorStore) SaveSessionSummaryArtifact(SessionSummary) (Artifact[SessionSummary], error) {
+	return Artifact[SessionSummary]{}, s.err
+}
+
+func (s errorStore) ListSessionSummaryArtifacts() ([]Artifact[SessionSummary], error) {
+	return nil, s.err
+}
+
 var (
 	defaultStoreMu    sync.Mutex
 	defaultStore      ArtifactStore
@@ -90,6 +125,21 @@ func DefaultArtifactStore() ArtifactStore {
 	}
 	defaultStore = store
 	return defaultStore
+}
+
+func SetDefaultArtifactStoreForTest(store ArtifactStore) func() {
+	defaultStoreMu.Lock()
+	oldStore := defaultStore
+	oldMaker := defaultStoreMaker
+	defaultStore = store
+	defaultStoreMaker = func() (ArtifactStore, error) { return store, nil }
+	defaultStoreMu.Unlock()
+	return func() {
+		defaultStoreMu.Lock()
+		defaultStore = oldStore
+		defaultStoreMaker = oldMaker
+		defaultStoreMu.Unlock()
+	}
 }
 
 func configDir() (string, error) {

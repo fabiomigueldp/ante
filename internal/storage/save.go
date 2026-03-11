@@ -28,6 +28,7 @@ type SaveSlot struct {
 	BotSeeds   map[engine.PlayerID]int64        `json:"bot_seeds"`
 	BotStates  map[engine.PlayerID]BotStateSave `json:"bot_states,omitempty"`
 	Config     GameConfig                       `json:"config"`
+	Metrics    SessionMetricsSnapshot           `json:"metrics,omitempty"`
 	History    []HandRecordSave                 `json:"history"`
 	Tournament TournamentSaveData               `json:"tournament,omitempty"`
 	CashGame   CashGameSaveData                 `json:"cash_game,omitempty"`

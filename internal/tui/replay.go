@@ -8,26 +8,24 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/fabiomigueldp/ante/internal/engine"
+	"github.com/fabiomigueldp/ante/internal/storage"
 )
 
-// ReplayModel replays a recorded hand step by step.
+// ReplayModel replays a transcript-backed hand step by step.
 type ReplayModel struct {
 	width  int
 	height int
-	record *engine.HandRecord
-	step   int // current action index
+	chunk  *storage.TranscriptChunk
+	step   int
 	total  int
 }
 
-func NewReplayModel(record *engine.HandRecord) ReplayModel {
+func NewReplayModel(chunk *storage.TranscriptChunk) ReplayModel {
 	total := 0
-	if record != nil {
-		total = len(record.Actions)
+	if chunk != nil {
+		total = len(chunk.Records)
 	}
-	return ReplayModel{
-		record: record,
-		total:  total,
-	}
+	return ReplayModel{chunk: chunk, total: total}
 }
 
 func (m ReplayModel) Init() tea.Cmd { return nil }
@@ -61,121 +59,117 @@ func (m ReplayModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m ReplayModel) View() string {
-	if m.record == nil {
+	if m.chunk == nil {
 		content := lipgloss.JoinVertical(lipgloss.Center,
 			StyleTitle.Render("HAND REPLAY"),
 			"",
-			StyleDim.Render("No hand data to replay."),
+			StyleDim.Render("No transcript data to replay."),
 			"",
 			StyleDim.Render("[Esc] Back"),
 		)
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
 	}
-
-	title := StyleTitle.Render(fmt.Sprintf("HAND #%d REPLAY", m.record.HandID))
-
-	var sections []string
-	sections = append(sections, title, "")
-
-	// Hand info
-	sections = append(sections, fmt.Sprintf("  Blinds: %d/%d", m.record.Blinds.SB, m.record.Blinds.BB))
-	sections = append(sections, fmt.Sprintf("  Dealer: Seat %d", m.record.DealerSeat))
-
-	// Players
-	sections = append(sections, "")
-	sections = append(sections, StyleSubtitle.Render("  Players:"))
-	for _, p := range m.record.Players {
-		sections = append(sections, fmt.Sprintf("    Seat %d: %s (%s)", p.Seat, p.Name, ChipStr(p.Stack)))
+	sections := []string{
+		StyleTitle.Render(fmt.Sprintf("HAND #%d REPLAY", m.chunk.HandID)),
+		"",
+		fmt.Sprintf("  Blinds: %d/%d", m.chunk.Blinds.SB, m.chunk.Blinds.BB),
+		fmt.Sprintf("  Dealer: Seat %d", m.chunk.DealerSeat),
+		fmt.Sprintf("  Chunk: %s", truncateID(m.chunk.ID)),
+		"",
+		StyleSubtitle.Render("  Players:"),
 	}
-
-	// Board (show cards dealt up to current step)
-	sections = append(sections, "")
-	board := m.boardAtStep()
-	if len(board) > 0 {
-		sections = append(sections, "  Board: "+RenderBoard(board))
-	} else {
-		sections = append(sections, "  Board: "+StyleDim.Render("(none)"))
+	for _, player := range m.chunk.Players {
+		sections = append(sections, fmt.Sprintf("    Seat %d: %s (%s)", player.Seat, player.Name, ChipStr(player.Stack)))
 	}
-
-	// Actions up to current step
-	sections = append(sections, "")
-	sections = append(sections, StyleSubtitle.Render("  Actions:"))
-
+	sections = append(sections, "", "  Board: "+m.renderBoard(), "", StyleSubtitle.Render("  Timeline:"))
 	if m.total == 0 {
-		sections = append(sections, StyleDim.Render("    (no actions recorded)"))
+		sections = append(sections, StyleDim.Render("    (no transcript records)"))
 	} else {
 		for i := 0; i < m.step && i < m.total; i++ {
-			action := m.record.Actions[i]
-			name := m.playerName(action.PlayerID)
-			actStr := ActionStr(action.Type)
-			line := fmt.Sprintf("    %s %s", name, actStr)
-			if action.Amount > 0 {
-				line += " " + ChipStr(action.Amount)
-			}
-			sections = append(sections, line)
+			sections = append(sections, "    "+m.describeRecord(m.chunk.Records[i]))
 		}
 		if m.step < m.total {
 			sections = append(sections, StyleDim.Render("    ..."))
 		}
 	}
-
-	// Progress
-	sections = append(sections, "")
-	progress := fmt.Sprintf("  Step %d / %d", m.step, m.total)
-	bar := m.renderProgressBar()
-	sections = append(sections, progress+"  "+bar)
-
-	sections = append(sections, "")
-	sections = append(sections, StyleDim.Render("[Left/Right] Step  |  [Home/End] Jump  |  [Esc] Back"))
-
+	sections = append(sections,
+		"",
+		fmt.Sprintf("  Step %d / %d  %s", m.step, m.total, m.renderProgressBar()),
+		"",
+		StyleDim.Render("[Left/Right] Step  |  [Home/End] Jump  |  [Esc] Back"),
+	)
 	content := lipgloss.JoinVertical(lipgloss.Left, sections...)
-
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorDarkGray).
 		Padding(1, 3).
 		Render(content)
-
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
-func (m ReplayModel) boardAtStep() []engine.Card {
-	if m.record == nil || len(m.record.Board) == 0 {
+func (m ReplayModel) renderBoard() string {
+	board := m.visibleBoard()
+	if len(board) == 0 {
+		return StyleDim.Render("(none)")
+	}
+	return RenderBoard(board)
+}
+
+func (m ReplayModel) visibleBoard() []engine.Card {
+	if m.chunk == nil {
 		return nil
 	}
-	// Show board cards based on the current action step
-	// Simple heuristic: show board as-is up to what's been dealt
-	if m.step >= m.total {
-		return m.record.Board
-	}
-	// Count street transitions to determine visible board cards
-	// For simplicity, show all board cards once we're past preflop
-	streets := 0
-	for i := 0; i < m.step && i < len(m.record.Actions); i++ {
-		if m.record.Actions[i].Type == engine.ActionFold ||
-			m.record.Actions[i].Type == engine.ActionCheck ||
-			m.record.Actions[i].Type == engine.ActionCall ||
-			m.record.Actions[i].Type == engine.ActionBet ||
-			m.record.Actions[i].Type == engine.ActionRaise ||
-			m.record.Actions[i].Type == engine.ActionAllIn {
-			// Count approximate street boundaries
+	board := make([]engine.Card, 0, 5)
+	for i := 0; i < m.step && i < len(m.chunk.Records); i++ {
+		record := m.chunk.Records[i]
+		if record.Kind == "street_advanced" {
+			board = append(board, record.NewCards...)
 		}
-		_ = streets
 	}
-	// For now, just show all board cards when past first action
-	if m.step > 0 {
-		return m.record.Board
+	return board
+}
+
+func (m ReplayModel) describeRecord(record storage.TranscriptRecord) string {
+	switch record.Kind {
+	case "street_advanced":
+		return fmt.Sprintf("%s -> %s", StreetStr(record.Street), RenderBoard(record.NewCards))
+	case "action_taken":
+		name := m.playerName(record.PlayerID)
+		if record.Action == nil {
+			return name + " acts"
+		}
+		line := fmt.Sprintf("%s %s", name, ActionStr(record.Action.Type))
+		if record.Action.Amount > 0 {
+			line += " " + ChipStr(record.Action.Amount)
+		}
+		return line
+	case "hand_revealed":
+		return fmt.Sprintf("%s shows %s  %s", m.playerName(record.PlayerID), RenderHoleCards(record.ShownCards, true), StyleHandRank.Render(record.EvalName))
+	case "pot_awarded":
+		winners := make([]string, 0, len(record.Winners))
+		for _, winner := range record.Winners {
+			winners = append(winners, m.playerName(winner))
+		}
+		return fmt.Sprintf("%s wins %s", strings.Join(winners, ", "), ChipStr(record.AwardAmount))
+	case "showdown_started":
+		return "Showdown"
+	case "blind_posted":
+		return fmt.Sprintf("%s posts %s", m.playerName(record.PlayerID), ChipStr(record.AwardAmount))
+	default:
+		if record.Message != "" {
+			return record.Message
+		}
+		return record.Kind
 	}
-	return nil
 }
 
 func (m ReplayModel) playerName(pid engine.PlayerID) string {
-	if m.record == nil {
+	if m.chunk == nil {
 		return fmt.Sprintf("P%d", pid)
 	}
-	for _, p := range m.record.Players {
-		if p.ID == pid {
-			return p.Name
+	for _, player := range m.chunk.Players {
+		if player.ID == pid {
+			return player.Name
 		}
 	}
 	return fmt.Sprintf("P%d", pid)

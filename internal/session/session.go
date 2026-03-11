@@ -12,6 +12,7 @@ import (
 
 	"github.com/fabiomigueldp/ante/internal/ai"
 	"github.com/fabiomigueldp/ante/internal/engine"
+	"github.com/fabiomigueldp/ante/internal/storage"
 )
 
 // Config holds all parameters needed to start a game session.
@@ -73,6 +74,10 @@ type Session struct {
 	stopOnce    sync.Once
 	seq         uint64
 	resumed     bool
+	deps        Dependencies
+	transcript  *TranscriptWriter
+	metrics     *MetricsAccumulator
+	Summary     *storage.SessionSummary
 }
 
 // New creates a session from config. Does not start the game loop.
@@ -183,6 +188,18 @@ func New(cfg Config) (*Session, error) {
 		botOrder:   botOrder,
 		stop:       make(chan struct{}),
 	}
+	deps := sessionDependenciesProvider()
+	startAnchor, err := deps.TimeAnchorProvider.Now()
+	if err != nil {
+		return nil, fmt.Errorf("creating session start time anchor: %w", err)
+	}
+	transcript, err := newTranscriptWriter(deps.ArtifactStore, deps.TimeAnchorProvider, sess.SessionID, cfg.PlayerName, modeString(cfg.Mode), startAnchor)
+	if err != nil {
+		return nil, fmt.Errorf("creating transcript writer: %w", err)
+	}
+	sess.deps = deps
+	sess.transcript = transcript
+	sess.metrics = newMetricsAccumulator(startAnchor)
 
 	// Wire tournament/cash game manager
 	switch cfg.Mode {
@@ -252,8 +269,11 @@ func (s *Session) Run() {
 			s.Table.ApplyHandResults(hand)
 		}
 
-		// Record hand history
-		s.recordHand(hand)
+		// Record authoritative hand artifacts and metrics.
+		if err := s.recordHand(hand); err != nil {
+			s.emitEnvelope(Envelope{Error: &SessionError{Code: "session_error", Message: fmt.Sprintf("Unable to persist hand transcript: %v", err)}})
+			return
+		}
 
 		// Emit hand summary
 		s.emitEnvelope(Envelope{HandID: hand.ID, Notice: &Notice{Type: "hand_complete", Message: fmt.Sprintf("Hand #%d complete", hand.ID)}})
@@ -473,8 +493,12 @@ func (s *Session) buildHandSummary(hand *engine.Hand) HandSummary {
 	return summary
 }
 
-// recordHand saves the hand to history.
-func (s *Session) recordHand(hand *engine.Hand) {
+// recordHand saves the hand to history and transcript.
+func (s *Session) recordHand(hand *engine.Hand) error {
+	anchor, err := s.deps.TimeAnchorProvider.Now()
+	if err != nil {
+		return err
+	}
 	snapshots := make([]engine.PlayerSnapshot, 0, len(hand.Players))
 	for _, p := range hand.Players {
 		if p != nil {
@@ -495,9 +519,15 @@ func (s *Session) recordHand(hand *engine.Hand) {
 		Board:      append([]engine.Card(nil), hand.Board...),
 		Actions:    append([]engine.Action(nil), hand.Actions...),
 		Events:     append([]engine.Event(nil), hand.Events...),
-		Timestamp:  time.Now(),
+		Timestamp:  anchor.Timestamp,
 	}
 	s.History.Add(record)
+	refs, err := s.transcript.CommitHand(s, hand, record)
+	if err != nil {
+		return err
+	}
+	s.metrics.ObserveHand(hand, s.HumanID, refs)
+	return nil
 }
 
 // emitEngineEvents wraps engine events as envelopes and sends them.
@@ -515,6 +545,10 @@ func (s *Session) emitHandSummary(summary HandSummary) {
 
 // emitSessionEnd sends the final session event.
 func (s *Session) emitSessionEnd() {
+	if err := s.persistSessionSummary(); err != nil {
+		s.emitEnvelope(Envelope{Error: &SessionError{Code: "session_error", Message: fmt.Sprintf("Unable to persist session summary: %v", err)}})
+		return
+	}
 	msg := "Session over."
 	if s.Tournament != nil {
 		results := s.Tournament.Results()

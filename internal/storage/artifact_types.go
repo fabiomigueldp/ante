@@ -10,6 +10,7 @@ const (
 	ArtifactKindStatsStore        ArtifactKind = "sandbox_stats_store"
 	ArtifactKindTranscriptChunk   ArtifactKind = "sandbox_transcript_chunk"
 	ArtifactKindTranscriptHead    ArtifactKind = "sandbox_transcript_head"
+	ArtifactKindSessionSummary    ArtifactKind = "sandbox_session_summary"
 	ArtifactKindMigrationManifest ArtifactKind = "migration_manifest"
 )
 
@@ -24,6 +25,8 @@ const (
 	artifactVersionSaveSlot        = 1
 	artifactVersionStatsStore      = 1
 	artifactVersionTranscriptChunk = 1
+	artifactVersionTranscriptHead  = 1
+	artifactVersionSessionSummary  = 1
 	migrationManifestVersion       = 1
 )
 

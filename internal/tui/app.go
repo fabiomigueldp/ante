@@ -222,8 +222,11 @@ func (a App) switchTo(msg switchScreenMsg) (tea.Model, tea.Cmd) {
 	case ScreenHistory:
 		a.history = NewHistoryViewModel()
 	case ScreenReplay:
-		if record, ok := msg.data.(*session.Session); ok && record != nil && record.History != nil {
-			_ = record
+		if chunk, ok := msg.data.(*storage.TranscriptChunk); ok && chunk != nil {
+			a.replay = NewReplayModel(chunk)
+		} else if chunk, ok := msg.data.(storage.TranscriptChunk); ok {
+			copyChunk := chunk
+			a.replay = NewReplayModel(&copyChunk)
 		}
 	case ScreenSettings:
 		a.config = storage.LoadConfig()

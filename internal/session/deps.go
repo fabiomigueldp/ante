@@ -7,6 +7,8 @@ type Dependencies struct {
 	TimeAnchorProvider storage.TimeAnchorProvider
 }
 
+var sessionDependenciesProvider = DefaultDependencies
+
 func DefaultDependencies() Dependencies {
 	store := storage.DefaultArtifactStore()
 	return Dependencies{

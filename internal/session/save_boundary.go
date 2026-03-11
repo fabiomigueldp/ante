@@ -34,7 +34,10 @@ func (s *Session) BuildSaveArtifact() (*storage.SaveSlot, error) {
 	if !s.CanSave() {
 		return nil, ErrSaveMidHandNotSupported
 	}
-	deps := DefaultDependencies()
+	deps := s.deps
+	if deps.ArtifactStore == nil || deps.TimeAnchorProvider == nil {
+		deps = sessionDependenciesProvider()
+	}
 	anchor, err := deps.TimeAnchorProvider.Now()
 	if err != nil {
 		return nil, err
@@ -75,7 +78,11 @@ func (s *Session) BuildSaveArtifact() (*storage.SaveSlot, error) {
 			CashGameBuyIn:  s.Config.CashGameBuyIn,
 			CashGameBlinds: s.Config.CashGameBlinds,
 		},
+		Metrics: storage.SessionMetricsSnapshot{},
 		History: buildHistorySaves(s),
+	}
+	if s.metrics != nil {
+		slot.Metrics = s.metrics.Snapshot()
 	}
 	for playerID, bot := range s.Bots {
 		state := bot.State()

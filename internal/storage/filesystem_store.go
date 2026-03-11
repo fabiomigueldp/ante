@@ -238,6 +238,14 @@ func (s *FileSystemStore) transcriptChunkPath(transcriptID, chunkID string) stri
 	return filepath.Join(s.rootDir, "sandbox", "transcripts", transcriptID, chunkID+".json")
 }
 
+func (s *FileSystemStore) transcriptHeadPath(transcriptID string) string {
+	return filepath.Join(s.rootDir, "sandbox", "transcripts", transcriptID, "head.json")
+}
+
+func (s *FileSystemStore) sessionSummaryPath(sessionID string) string {
+	return filepath.Join(s.rootDir, "sandbox", "summaries", sessionID+".json")
+}
+
 func (s *FileSystemStore) legacyConfigPath() string {
 	return filepath.Join(s.rootDir, "config.json")
 }

@@ -41,7 +41,16 @@ func statsPath() (string, error) {
 }
 
 func LoadStatsResult() (*StatsStore, error) {
-	artifact, err := DefaultArtifactStore().LoadStatsArtifact()
+	store := DefaultArtifactStore()
+	summaries, err := store.ListSessionSummaryArtifacts()
+	if err == nil && len(summaries) > 0 {
+		aggregated := aggregateStatsFromSummaries(summaries)
+		if _, saveErr := store.SaveStatsArtifact(*aggregated); saveErr == nil {
+			return aggregated, nil
+		}
+		return aggregated, nil
+	}
+	artifact, err := store.LoadStatsArtifact()
 	if err == nil {
 		return &artifact.Payload, nil
 	}
@@ -152,4 +161,32 @@ func (s *StatsStore) RecentSessions(n int) []SessionStats {
 	out := make([]SessionStats, n)
 	copy(out, s.Sessions[len(s.Sessions)-n:])
 	return out
+}
+
+func aggregateStatsFromSummaries(summaries []Artifact[SessionSummary]) *StatsStore {
+	store := &StatsStore{Sessions: make([]SessionStats, 0, len(summaries))}
+	for _, artifact := range summaries {
+		summary := artifact.Payload
+		store.Sessions = append(store.Sessions, SessionStats{
+			ID:            summary.SessionID,
+			Mode:          summary.Mode,
+			StartTime:     summary.StartTime.Timestamp,
+			EndTime:       summary.EndTime.Timestamp,
+			HandsPlayed:   summary.HandsPlayed,
+			FinalPosition: summary.FinalPosition,
+			TotalPlayers:  summary.TotalPlayers,
+			ChipsWon:      summary.ChipsWon,
+			BiggestPot:    summary.BiggestPot,
+			HandsWon:      summary.HandsWon,
+			FlopsSeen:     summary.FlopsSeen,
+			ShowdownsWon:  summary.ShowdownsWon,
+			ShowdownsSeen: summary.ShowdownsSeen,
+			AllInsWon:     summary.AllInsWon,
+			AllInsSeen:    summary.AllInsSeen,
+			BestHand:      summary.BestHand,
+			LargestWin:    summary.LargestWin,
+			LongestStreak: summary.LongestStreak,
+		})
+	}
+	return store
 }
