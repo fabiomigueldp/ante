@@ -33,7 +33,11 @@ The project is under active development. The core engine and TUI are mature and 
 - **Tournament Mechanics** -- Configurable blind structure with timed level increases, player elimination tracking with positional ranking, and automatic heads-up transition detection.
 - **Pot Odds Display** -- When facing a bet, the action bar shows pot size, call cost, odds ratio, and equity percentage to help inform decisions.
 - **In-Memory Hand History** -- Every hand played in a session is recorded with full action sequences, board cards, player snapshots, blinds, and seeds via the `SessionHistory` system.
-- **Configuration Persistence** -- Player name, sound settings, pot odds toggle, default game mode, difficulty, seat count, starting stack, and theme preference are saved locally as JSON and restored automatically on launch.
+- **Save / Load / Continue** -- Sessions can be saved from the pause menu and resumed from the Load Game screen using artifact-backed persistence. The current implementation supports save and resume at hand boundaries; mid-hand resume is intentionally unsupported and fails explicitly.
+- **Transcript-Backed Hand History** -- Completed hands are persisted as authoritative transcript chunks with checkpoint hashing, stable IDs, and hand-level browsing through the Hand History screen.
+- **Accurate Hand Replay** -- Replay is driven directly from transcript records and reveals the board street-by-street from the recorded events rather than UI heuristics.
+- **Statistics and Results Persistence** -- Session summaries, transcript-linked metrics, and aggregate statistics are persisted automatically and drive the Results and Statistics screens.
+- **Configuration Persistence** -- Player name, sound settings, pot odds toggle, default game mode, difficulty, seat count, starting stack, and theme preference are saved locally through the artifact-backed storage layer and restored automatically on launch.
 - **Engine Simulator** -- A standalone simulation runner (`cmd/sim`) exercises the engine over thousands of hands to verify correctness and stability without involving the TUI.
 - **Continuous Integration** -- GitHub Actions runs tests, verifies module graph integrity, and builds binaries for both Linux and Windows (with native audio) on every push and pull request.
 
@@ -41,10 +45,9 @@ The project is under active development. The core engine and TUI are mature and 
 
 The following features have scaffolding, UI screens, or backend primitives in place, but are not yet fully connected end-to-end. They are listed here for transparency and are actively tracked in the [development roadmap](ROADMAP.md).
 
-- **Save / Load / Continue** -- The storage layer can serialize and deserialize game slots, and the Load Game screen lists saved slots. However, the save action in the pause menu and the load action on slot selection are not yet wired to real persistence and session reconstruction. Today only the New Game flow is functional.
-- **Statistics Persistence** -- The `StatsStore` and `SessionStats` types exist along with `SaveStats()` and `LoadStats()` functions. The Statistics screen reads persisted data. However, statistics are not yet automatically recorded at the end of every session, so the store may remain empty unless manually populated.
-- **Hand History Browser** -- The "Hand History" menu entry shows a list of past sessions (not individual hands), and the "View Details" action on a selected entry is not yet connected. Hand-level browsing and per-hand replay are planned but not implemented.
-- **Hand Replay** -- A `ReplayModel` exists and can step through actions if provided a valid `HandRecord`, but the wiring from the history browser to the replay screen is incomplete. Board card progression during replay uses a simplified heuristic rather than faithful street-by-street reconstruction.
+- **Cash Game Continuity** -- Cash mode is fully playable and its summaries, stats, and transcripts persist correctly, but it still behaves as a bounded local session rather than a true open-ended table lifecycle.
+- **Tournament UX Depth** -- Tournament flow is complete and persistent, but richer progression HUD elements and deeper post-hand tournament presentation are still planned.
+- **AI Strategic Depth** -- Bot personalities are functional and differentiated, but several profile parameters can still be leveraged more aggressively in later tuning passes.
 
 ## Project Structure
 
@@ -59,13 +62,16 @@ internal/
                table management, and hand history recording
   ai/          Bot decision engine, character profiles, hand strength
                and draw estimation, tilt modeling, and skill tiers
-  session/     Orchestration layer connecting engine, AI, and TUI;
-               manages the game loop, event emission, and state snapshots
+  session/     Authoritative orchestration layer connecting engine, AI,
+               storage, and TUI; manages the game loop, transcript writing,
+               reducer-facing envelopes, save/load reconstruction, metrics,
+               and session summaries
   tui/         All Bubble Tea views: splash, menu, setup, game table,
                pause, results, stats, history, replay, settings, help,
                load game, theme, and card rendering utilities
-  storage/     Local persistence for configuration, save slots,
-               and player statistics
+  storage/     Artifact-backed local persistence for configuration, save slots,
+               transcript chunks and heads, session summaries, history indexes,
+               and aggregate statistics read-models
   audio/       Procedural sound synthesis, playback management,
                native and no-op backends, and cooldown logic
 ```
@@ -93,19 +99,19 @@ go run ./cmd/sim -hands 1000
 Compile the TUI application:
 
 ```bash
-go build -o ./bin/ante ./cmd/ante
+go build -o ./bin/ante.exe ./cmd/ante
 ```
 
 Compile with native audio support (Windows):
 
 ```bash
-go build -tags nativeaudio -o ./bin/ante ./cmd/ante
+go build -tags nativeaudio -o ./bin/ante-nativeaudio.exe ./cmd/ante
 ```
 
 Compile the simulator:
 
 ```bash
-go build -o ./bin/sim ./cmd/sim
+go build -o ./bin/sim.exe ./cmd/sim
 ```
 
 Or use the Makefile:
@@ -152,7 +158,7 @@ make sim          # Run a 1000-hand simulation
 
 ## Configuration
 
-Ante stores user configuration at `~/.ante/config.json`. All settings are editable from the in-game Settings screen and persist across sessions. Configurable options include:
+Ante stores user configuration under `~/.ante/local/config/` through the artifact-backed storage layer. All settings are editable from the in-game Settings screen and persist across sessions. Configurable options include:
 
 - Player name
 - Sound on/off and volume level
@@ -173,10 +179,10 @@ Ante has a strong core and a polished interface. The engine handles proper Hold'
 | TUI / interface          | Mature and polished                                            |
 | Audio                    | Working, procedurally generated                                |
 | Configuration            | Persistent, editable                                           |
-| Save / Load              | Scaffolded, not wired                                          |
-| Statistics               | Backend exists, session integration pending                    |
-| Hand History browser     | Session-level list only                                        |
-| Hand Replay              | Model exists, wiring incomplete                                |
+| Save / Load              | Functional at hand boundaries                                  |
+| Statistics               | Persisted and summary-backed                                   |
+| Hand History browser     | Transcript-backed session and hand navigation                  |
+| Hand Replay              | Transcript-backed, street-accurate                             |
 | Cash Game continuity     | Plays to completion, not yet a true open-ended table           |
 | Tournament UX depth      | Functional, progression HUD planned                            |
 | AI strategic depth       | Several profile parameters are defined but not yet leveraged   |
