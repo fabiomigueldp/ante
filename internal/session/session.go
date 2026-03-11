@@ -48,6 +48,34 @@ type ReadyState struct {
 	LastResultMessage string
 }
 
+type SessionTerminationReason uint8
+
+const (
+	TerminationReasonUnknown SessionTerminationReason = iota
+	TerminationReasonCompleted
+	TerminationReasonLeftTable
+	TerminationReasonForfeited
+	TerminationReasonErrored
+	TerminationReasonInterrupted
+)
+
+func (r SessionTerminationReason) String() string {
+	switch r {
+	case TerminationReasonCompleted:
+		return "completed"
+	case TerminationReasonLeftTable:
+		return "left_table"
+	case TerminationReasonForfeited:
+		return "forfeited"
+	case TerminationReasonErrored:
+		return "errored"
+	case TerminationReasonInterrupted:
+		return "interrupted"
+	default:
+		return "unknown"
+	}
+}
+
 // HandSummary is emitted after each hand completes.
 type HandSummary struct {
 	HandID       int
@@ -77,18 +105,20 @@ type Session struct {
 	ActionResp chan PlayerActionIntent // TUI -> session (unbuffered)
 
 	// Internal
-	currentHand *engine.Hand
-	rng         *mathrand.Rand
-	botOrder    []engine.PlayerID // for deterministic iteration
-	stop        chan struct{}
-	stopOnce    sync.Once
-	seq         uint64
-	resumed     bool
-	deps        Dependencies
-	transcript  *TranscriptWriter
-	metrics     *MetricsAccumulator
-	Summary     *storage.SessionSummary
-	readyState  *ReadyState
+	currentHand         *engine.Hand
+	rng                 *mathrand.Rand
+	botOrder            []engine.PlayerID // for deterministic iteration
+	stop                chan struct{}
+	stopOnce            sync.Once
+	seq                 uint64
+	resumed             bool
+	deps                Dependencies
+	transcript          *TranscriptWriter
+	metrics             *MetricsAccumulator
+	Summary             *storage.SessionSummary
+	readyState          *ReadyState
+	terminationReason   SessionTerminationReason
+	terminationPosition int
 }
 
 // New creates a session from config. Does not start the game loop.
@@ -662,6 +692,12 @@ func (s *Session) emitResumedBoundaryPrompt() bool {
 }
 
 func (s *Session) emitSessionEndFromLeave() {
+	if s.Config.Mode == engine.ModeCashGame {
+		s.terminationReason = TerminationReasonLeftTable
+	} else {
+		s.terminationReason = TerminationReasonForfeited
+		s.terminationPosition = max(1, len(s.Table.ActivePlayers()))
+	}
 	if err := s.persistSessionSummary(); err != nil {
 		s.emitEnvelope(Envelope{Error: &SessionError{Code: "session_error", Message: fmt.Sprintf("Unable to persist session summary: %v", err)}})
 		return
@@ -674,6 +710,10 @@ func (s *Session) emitSessionEndFromLeave() {
 		} else {
 			msg = fmt.Sprintf("You left the table down %d chips.", -profit)
 		}
+	} else if s.terminationPosition > 0 {
+		msg = fmt.Sprintf("You forfeited the session in position #%d.", s.terminationPosition)
+	} else {
+		msg = "You forfeited the session."
 	}
 	s.emitEnvelope(Envelope{Notice: &Notice{Type: "session_ended", Message: msg}})
 }
@@ -730,6 +770,9 @@ func (s *Session) emitHandSummary(summary HandSummary) {
 
 // emitSessionEnd sends the final session event.
 func (s *Session) emitSessionEnd() {
+	if s.terminationReason == TerminationReasonUnknown {
+		s.terminationReason = TerminationReasonCompleted
+	}
 	if err := s.persistSessionSummary(); err != nil {
 		s.emitEnvelope(Envelope{Error: &SessionError{Code: "session_error", Message: fmt.Sprintf("Unable to persist session summary: %v", err)}})
 		return

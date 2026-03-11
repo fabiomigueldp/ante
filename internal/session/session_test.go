@@ -1,6 +1,7 @@
 package session
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/fabiomigueldp/ante/internal/ai"
@@ -276,6 +277,61 @@ func TestSessionLeaveTableEndsCleanlyFromBetweenHands(t *testing.T) {
 	}
 	if sess.Summary == nil {
 		t.Fatal("expected session summary to be persisted on leave-table flow")
+	}
+	if sess.Summary.ResultLabel == "Winner!" {
+		t.Fatal("cash leave summary should not claim a tournament win")
+	}
+	if sess.Summary.TerminationReason != TerminationReasonLeftTable.String() {
+		t.Fatalf("termination reason = %q, want %q", sess.Summary.TerminationReason, TerminationReasonLeftTable.String())
+	}
+}
+
+func TestSessionLeaveTournamentMarksForfeitInsteadOfWinner(t *testing.T) {
+	store, _, _ := newSessionTestStore(t)
+	useSessionDependenciesForTest(t, Dependencies{ArtifactStore: store, TimeAnchorProvider: store.TimeAnchorProvider()})
+	sess, err := New(Config{
+		Mode:          engine.ModeTournament,
+		Difficulty:    ai.DifficultyEasy,
+		Seats:         4,
+		StartingStack: 50,
+		PlayerName:    "Hero",
+		Seed:          91,
+	})
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sess.Run()
+	}()
+	for env := range sess.Updates {
+		if env.Prompt != nil && env.Prompt.Kind == PromptKindAction {
+			select {
+			case sess.ActionResp <- PlayerActionIntent{PromptSeq: env.Prompt.Seq, HandID: env.Prompt.HandID, Action: defaultActionForPrompt(env.Prompt)}:
+			case <-sess.stop:
+			}
+			continue
+		}
+		if env.Prompt != nil && env.Prompt.Kind == PromptKindBetweenHands {
+			select {
+			case sess.ActionResp <- PlayerActionIntent{PromptSeq: env.Prompt.Seq, HandID: env.Prompt.HandID, Control: ControlIntent{Kind: ControlIntentLeaveTable}}:
+			case <-sess.stop:
+			}
+		}
+	}
+	<-done
+	if sess.Summary == nil {
+		t.Fatal("expected tournament summary after leave-table flow")
+	}
+	if !strings.Contains(sess.Summary.ResultLabel, "Forfeited") {
+		t.Fatalf("result label = %q, want forfeited result", sess.Summary.ResultLabel)
+	}
+	if sess.Summary.FinalPosition == 1 {
+		t.Fatalf("final position = %d, want non-winning forfeit position", sess.Summary.FinalPosition)
+	}
+	if sess.Summary.TerminationReason != TerminationReasonForfeited.String() {
+		t.Fatalf("termination reason = %q, want %q", sess.Summary.TerminationReason, TerminationReasonForfeited.String())
 	}
 }
 

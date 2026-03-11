@@ -222,7 +222,17 @@ func (m *MetricsAccumulator) BuildSummary(s *Session, end storage.TimeAnchor, tr
 	}
 	finalPosition := 0
 	resultLabel := "Session complete"
-	if s.Tournament != nil {
+	terminationReason := s.terminationReason.String()
+	if s.terminationReason == TerminationReasonForfeited {
+		finalPosition = s.terminationPosition
+		if finalPosition <= 0 {
+			finalPosition = len(s.Table.ActivePlayers())
+			if finalPosition == 0 {
+				finalPosition = len(s.Table.Players)
+			}
+		}
+		resultLabel = fmt.Sprintf("Forfeited (#%d of %d)", finalPosition, len(s.Table.Players))
+	} else if s.Tournament != nil {
 		for _, result := range s.Tournament.Results() {
 			if result.PlayerID == s.HumanID {
 				finalPosition = result.Position
@@ -243,34 +253,35 @@ func (m *MetricsAccumulator) BuildSummary(s *Session, end storage.TimeAnchor, tr
 		}
 	}
 	return storage.SessionSummary{
-		ID:               s.SessionID,
-		SessionID:        s.SessionID,
-		TranscriptID:     transcriptHead.TranscriptID,
-		LatestChunkID:    transcriptHead.LatestChunkID,
-		LatestSnapshotID: transcriptHead.LatestSnapshotID,
-		CheckpointID:     transcriptHead.LatestCheckpointID,
-		CheckpointHash:   transcriptHead.LatestChunkHash,
-		PlayerName:       s.Config.PlayerName,
-		Mode:             modeString(s.Config.Mode),
-		StartTime:        m.startTime,
-		EndTime:          end,
-		HandsPlayed:      m.handsPlayed,
-		FinalPosition:    finalPosition,
-		TotalPlayers:     len(s.Table.Players),
-		FinalStack:       finalStack,
-		StartingChips:    s.startingChips(),
-		ChipsWon:         finalStack - s.startingChips(),
-		BiggestPot:       m.biggestPot,
-		HandsWon:         m.handsWon,
-		FlopsSeen:        m.flopsSeen,
-		ShowdownsWon:     m.showdownsWon,
-		ShowdownsSeen:    m.showdownsSeen,
-		AllInsWon:        m.allInsWon,
-		AllInsSeen:       m.allInsSeen,
-		BestHand:         defaultIfEmpty(m.bestHand, "N/A"),
-		LargestWin:       m.largestWin,
-		LongestStreak:    m.longestStreak,
-		ResultLabel:      resultLabel,
+		ID:                s.SessionID,
+		SessionID:         s.SessionID,
+		TranscriptID:      transcriptHead.TranscriptID,
+		LatestChunkID:     transcriptHead.LatestChunkID,
+		LatestSnapshotID:  transcriptHead.LatestSnapshotID,
+		CheckpointID:      transcriptHead.LatestCheckpointID,
+		CheckpointHash:    transcriptHead.LatestChunkHash,
+		PlayerName:        s.Config.PlayerName,
+		Mode:              modeString(s.Config.Mode),
+		StartTime:         m.startTime,
+		EndTime:           end,
+		HandsPlayed:       m.handsPlayed,
+		FinalPosition:     finalPosition,
+		TotalPlayers:      len(s.Table.Players),
+		FinalStack:        finalStack,
+		StartingChips:     s.startingChips(),
+		ChipsWon:          finalStack - s.startingChips(),
+		BiggestPot:        m.biggestPot,
+		HandsWon:          m.handsWon,
+		FlopsSeen:         m.flopsSeen,
+		ShowdownsWon:      m.showdownsWon,
+		ShowdownsSeen:     m.showdownsSeen,
+		AllInsWon:         m.allInsWon,
+		AllInsSeen:        m.allInsSeen,
+		BestHand:          defaultIfEmpty(m.bestHand, "N/A"),
+		LargestWin:        m.largestWin,
+		LongestStreak:     m.longestStreak,
+		TerminationReason: terminationReason,
+		ResultLabel:       resultLabel,
 	}
 }
 
